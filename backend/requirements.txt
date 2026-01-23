@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+xarray
+netcdf4
+cftime
+numpy
+pandas
+tqdm
+plotly
+zarr
+fsspec
+scipy

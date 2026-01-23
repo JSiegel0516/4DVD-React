@@ -1,0 +1,506 @@
+import React, { useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { createGraticuleLines } from '../gl/GraticuleLines';
+import { loadCoasts } from '../gl/loadCoasts';
+import { loadRiversAndLakes } from '../gl/loadRiversAndLakes';
+import { useGlobeSettings } from './GlobeSettingsContext';
+import { Box, Typography, Button } from '@mui/material';
+import * as Colormap from 'colormap';
+
+const GlobeWireframe = () => {
+  const mountRef = useRef();
+  const graticuleRef = useRef();
+  const coastsRef = useRef();
+  const riversLakesRef = useRef();
+  const controlsRef = useRef();
+  const cameraRef = useRef();
+  const sphereRef = useRef();
+  const sceneRef = useRef();
+  const raycasterRef = useRef(new THREE.Raycaster());
+  const mouseRef = useRef(new THREE.Vector2());
+  const [clickInfo, setClickInfo] = useState(null);
+  const [texture, setTexture] = useState(null);
+  const [gridData, setGridData] = useState(null);
+  const [metadata, setMetadata] = useState({ title: '', units: '' });
+
+  const { graphicalSettings, updateGraphicalSettings, selectedDataset, selectedDate } = useGlobeSettings();
+
+  const getFallbackUnits = (varName) => {
+    const unitMap = {
+      precip: 'mm/day',
+      temp: '°C',
+      temperature: '°C',
+      wind: 'm/s',
+    };
+    return unitMap[varName.toLowerCase()] || 'unknown';
+  };
+
+  useEffect(() => {
+    if (!selectedDataset) {
+      setMetadata({ title: '', units: '' });
+      setClickInfo(null);
+      return;
+    }
+
+    console.log('Fetching metadata for', selectedDataset.name);
+    fetch(`http://localhost:8080/api/datasets/metadata?var=${selectedDataset.name}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to fetch metadata: ${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then((data) => {
+        console.log('Fetched metadata:', { response: data });
+        const varInfo = data.variables.find(v => v.name === selectedDataset.name);
+        setMetadata({
+          title: varInfo?.long_name || selectedDataset.name,
+          units: varInfo?.units || getFallbackUnits(selectedDataset.name),
+        });
+      })
+      .catch((err) => {
+        console.error('Error fetching metadata:', err);
+        setMetadata({
+          title: selectedDataset.name,
+          units: getFallbackUnits(selectedDataset.name),
+        });
+      });
+  }, [selectedDataset]);
+
+  useEffect(() => {
+    if (!selectedDataset || !selectedDate) {
+      console.log('No dataset or date selected, skipping grid fetch');
+      setGridData(null);
+      setTexture(null);
+      setClickInfo(null);
+      return;
+    }
+
+    console.log('Fetching grid for', selectedDataset.name, 'on', selectedDate);
+    fetch(`http://localhost:8080/api/slice?var=${selectedDataset.name}&date=${selectedDate}&center=${graphicalSettings.pacificCentered ? 'pacific' : 'atlantic'}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
+        return res.json();
+      })
+      .then((data) => {
+        console.log('Fetched grid data:', { 
+          var: data.var, 
+          date: data.date_selected, 
+          min: data.min, 
+          max: data.max, 
+          lats: data.lats?.length, 
+          lons: data.lons?.length 
+        });
+        setGridData(data);
+      })
+      .catch((err) => {
+        console.error('Error fetching grid data:', err);
+        setGridData(null);
+        setTexture(null);
+        setClickInfo(null);
+      });
+  }, [selectedDataset, selectedDate, graphicalSettings.pacificCentered]);
+
+  useEffect(() => {
+    if (!gridData || !gridData.values || !gridData.lats || !gridData.lons) {
+      console.log('No valid grid data for texture:', { gridData });
+      setTexture(null);
+      return;
+    }
+
+    const { lats, lons, values, colormap_suggested = 'viridis', min: apiMin, max: apiMax } = gridData;
+    console.log('Generating texture:', { 
+      colormap: colormap_suggested, 
+      apiMin, 
+      apiMax, 
+      gridSize: `${lats.length}x${lons.length}`, 
+      pacific: graphicalSettings.pacificCentered 
+    });
+
+    let computedMin = apiMin;
+    let computedMax = apiMax;
+    if (!isFinite(apiMin) || !isFinite(apiMax) || apiMax === 0 || apiMax <= apiMin) {
+      const validValues = values.flat().filter(v => v !== null && isFinite(v));
+      computedMin = validValues.length > 0 ? Math.min(...validValues) : 0;
+      computedMax = validValues.length > 0 ? Math.max(...validValues) : 50;
+      console.log('Computed min/max from values:', { computedMin, computedMax, validCount: validValues.length });
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = lons.length;
+    canvas.height = lats.length;
+    const ctx = canvas.getContext('2d');
+
+    try {
+      const colors = Colormap({ colormap: colormap_suggested, nshades: 256, format: 'rgbaString' });
+      let invalidCount = 0;
+
+      for (let i = 0; i < lats.length; i++) {
+        for (let j = 0; j < lons.length; j++) {
+          const value = values[i][j];
+          if (value === null || !isFinite(value)) {
+            ctx.fillStyle = 'rgba(200,200,200,0.3)';
+            invalidCount++;
+          } else {
+            const normalized = Math.max(0, Math.min(1, (value - computedMin) / (computedMax - computedMin)));
+            if (!isFinite(normalized)) {
+              console.warn('Invalid normalized value:', { value, computedMin, computedMax, i, j });
+              ctx.fillStyle = 'rgba(200,200,200,0.3)';
+              invalidCount++;
+            } else {
+              const colorIdx = Math.floor(normalized * 255);
+              ctx.fillStyle = colors[colorIdx];
+            }
+          }
+          ctx.fillRect(j, lats.length - 1 - i, 1, 1);
+        }
+      }
+      console.log('Texture generated:', { invalidPixels: invalidCount, total: lats.length * lons.length });
+
+      const newTexture = new THREE.CanvasTexture(canvas);
+      newTexture.minFilter = THREE.LinearFilter;
+      newTexture.magFilter = THREE.LinearFilter;
+      newTexture.wrapS = THREE.RepeatWrapping;
+      newTexture.wrapT = THREE.ClampToEdgeWrapping;
+      newTexture.flipY = false;
+      newTexture.offset = new THREE.Vector2(graphicalSettings.pacificCentered ? -0.5 : 0, 0);
+      setTexture(newTexture);
+
+      if (sphereRef.current) {
+        sphereRef.current.material.map = newTexture;
+        sphereRef.current.material.needsUpdate = true;
+      }
+    } catch (err) {
+      console.error('Error generating texture:', err);
+      setTexture(null);
+    }
+  }, [gridData, graphicalSettings.pacificCentered]);
+
+  useEffect(() => {
+  if (!mountRef.current || !cameraRef.current || !sphereRef.current) return;
+
+  const handleClick = (event) => {
+    const rect = mountRef.current.getBoundingClientRect();
+    mouseRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouseRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
+    const intersects = raycasterRef.current.intersectObject(sphereRef.current);
+
+    if (intersects.length > 0) {
+      const { uv } = intersects[0];
+      if (!uv) return;
+
+      // UV → lat/lon
+      const lon = uv.x * 360 - 180;
+      const lat = uv.y * 180 - 90;
+
+      // Always include dataset metadata if available
+      const datasetName = metadata.title.includes("GPCP")
+        ? "GPCP V2.3"
+        : metadata.title.split(" ").slice(0, 3).join(" ");
+
+      setClickInfo({
+        dataset: datasetName,
+        units: metadata.units,
+        lat: `${Math.abs(lat).toFixed(2)}° ${lat >= 0 ? "N" : "S"}`,
+        lon: `${Math.abs(lon).toFixed(2)}° ${lon >= 0 ? "E" : "W"}`
+      });
+
+      console.log("Click info:", { lat, lon, dataset: datasetName });
+    } else {
+      setClickInfo(null);
+    }
+  };
+
+  mountRef.current.addEventListener("click", handleClick);
+  return () => mountRef.current.removeEventListener("click", handleClick);
+}, [metadata]);
+
+  useEffect(() => {
+    const width = mountRef.current.clientWidth;
+    const height = mountRef.current.clientHeight;
+
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+
+    let camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+    camera.position.set(4, 1, 4);
+    camera.lookAt(0, 0, 0);
+    scene.add(camera);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setClearColor(0xffffff, 1);
+    mountRef.current.innerHTML = '';
+    mountRef.current.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.1;
+    controls.rotateSpeed = 0.5;
+    controls.zoomSpeed = 0.5;
+    controls.enablePan = false;
+    controls.minDistance = 3;
+    controls.maxDistance = 20;
+    controlsRef.current = controls;
+
+    const material = new THREE.MeshStandardMaterial({ 
+      color: 0xffffff, 
+      wireframe: false,
+      map: texture || null,
+      transparent: true,
+      roughness: 0.8,
+      metalness: 0.2,
+    });
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(2, 64, 64),
+      material
+    );
+    scene.add(sphere);
+    sphereRef.current = sphere;
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    directionalLight.position.set(5, 3, 5);
+    scene.add(directionalLight);
+
+    const graticule = createGraticuleLines(graphicalSettings.pacificCentered, false);
+    graticuleRef.current = graticule;
+    graticule.visible = graphicalSettings.latLonLines;
+    scene.add(graticule);
+
+    console.log(`Initial load: coasts=${graphicalSettings.coasts}, pacificCentered=${graphicalSettings.pacificCentered}`);
+    loadCoasts(graphicalSettings.pacificCentered, false, graphicalSettings.coasts).then((coasts) => {
+      console.log(`Coasts loaded: ${coasts.children.length} lines`);
+      coastsRef.current = coasts;
+      scene.add(coasts);
+    });
+
+    console.log(`Initial load: rivers=${graphicalSettings.rivers}, lakes=${graphicalSettings.lakes}, pacificCentered=${graphicalSettings.pacificCentered}`);
+    loadRiversAndLakes(graphicalSettings.pacificCentered, false, graphicalSettings.rivers, graphicalSettings.lakes).then((riversLakes) => {
+      console.log(`Rivers and Lakes loaded: ${riversLakes.children.length} objects`);
+      riversLakesRef.current = riversLakes;
+      scene.add(riversLakes);
+    });
+
+    const animate = () => {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    const handleResize = () => {
+      const newWidth = mountRef.current.clientWidth;
+      const newHeight = mountRef.current.clientHeight;
+      renderer.setSize(newWidth, newHeight);
+      camera.aspect = newWidth / newHeight;
+      camera.updateProjectionMatrix();
+      if (texture) texture.needsUpdate = true;
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (mountRef.current && renderer.domElement.parentNode === mountRef.current) {
+        mountRef.current.removeChild(renderer.domElement);
+      }
+      renderer.dispose();
+      if (texture) texture.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (sphereRef.current && texture) {
+      sphereRef.current.material.map = texture;
+      sphereRef.current.material.needsUpdate = true;
+    }
+  }, [texture]);
+
+  useEffect(() => {
+    if (!cameraRef.current || !controlsRef.current || !sphereRef.current || !sceneRef.current || !graticuleRef.current) return;
+
+    const validResolutions = ['Low', 'Medium', 'High', 'None'];
+    const { globeView, pacificCentered, rivers, lakes, coasts, bumpMapping, latLonLines } = graphicalSettings;
+    const aspect = mountRef.current.clientWidth / mountRef.current.clientHeight;
+
+    if (!validResolutions.includes(rivers)) {
+      console.warn(`Invalid rivers resolution: ${rivers}. Valid options: ${validResolutions.join(', ')}`);
+    }
+    if (!validResolutions.includes(lakes)) {
+      console.warn(`Invalid lakes resolution: ${lakes}. Valid options: ${validResolutions.join(', ')}`);
+    }
+    if (!validResolutions.includes(coasts)) {
+      console.warn(`Invalid coasts resolution: ${coasts}. Valid options: ${validResolutions.join(', ')}`);
+    }
+
+    const currentPosition = cameraRef.current.position.clone();
+    const currentTarget = controlsRef.current.target.clone();
+    const distance = currentPosition.distanceTo(currentTarget);
+
+    if (globeView === '2D Mercator') {
+      window.open('/map2D.html', '_blank');
+      updateGraphicalSettings({ globeView: '3D Orthographic' });
+      return;
+    }
+
+    // Clear previous objects and dispose geometries
+    if (graticuleRef.current) {
+      sceneRef.current.remove(graticuleRef.current);
+      graticuleRef.current.children.forEach((child) => child.geometry.dispose());
+      graticuleRef.current = null;
+    }
+    if (coastsRef.current) {
+      sceneRef.current.remove(coastsRef.current);
+      coastsRef.current.children.forEach((child) => child.geometry.dispose());
+      coastsRef.current = null;
+    }
+    if (riversLakesRef.current) {
+      sceneRef.current.remove(riversLakesRef.current);
+      riversLakesRef.current.children.forEach((child) => child.geometry.dispose());
+      riversLakesRef.current = null;
+    }
+
+    console.log(`Updating: coasts=${coasts}, rivers=${rivers}, lakes=${lakes}, pacificCentered=${pacificCentered}`);
+    graticuleRef.current = createGraticuleLines(pacificCentered, false);
+    graticuleRef.current.visible = latLonLines;
+    sceneRef.current.add(graticuleRef.current);
+
+    Promise.all([
+      loadCoasts(pacificCentered, false, coasts),
+      loadRiversAndLakes(pacificCentered, false, rivers, lakes)
+    ]).then(([coastsGroup, riversLakes]) => {
+      console.log(`Coasts updated: ${coastsGroup.children.length} lines`);
+      console.log(`Rivers and Lakes updated: ${riversLakes.children.length} objects`);
+      coastsRef.current = coastsGroup;
+      riversLakesRef.current = riversLakes;
+      sceneRef.current.add(coastsGroup);
+      sceneRef.current.add(riversLakes);
+
+      if (texture) {
+        texture.offset.x = pacificCentered ? -0.5 : 0;
+        texture.needsUpdate = true;
+        sphereRef.current.material.map = texture;
+        sphereRef.current.material.needsUpdate = true;
+      }
+
+      cameraRef.current.position.copy(currentPosition.normalize().multiplyScalar(distance));
+      controlsRef.current.target.copy(currentTarget);
+      cameraRef.current.lookAt(controlsRef.current.target);
+      cameraRef.current.updateProjectionMatrix();
+      controlsRef.current.update();
+    });
+
+    if (bumpMapping !== 'None') {
+      console.warn('Bump mapping is not supported with MeshStandardMaterial. Set to "None" to avoid this warning.');
+    }
+
+    if (globeView === '3D') {
+      if (!(cameraRef.current instanceof THREE.PerspectiveCamera)) {
+        cameraRef.current = new THREE.PerspectiveCamera(45, aspect, 0.1, 1000);
+        controlsRef.current.object = cameraRef.current;
+        sceneRef.current.add(cameraRef.current);
+      }
+      sphereRef.current.material.wireframe = true;
+      sphereRef.current.visible = true;
+      controlsRef.current.minDistance = 3;
+      controlsRef.current.maxDistance = 20;
+      controlsRef.current.zoomSpeed = 0.5;
+      controlsRef.current.enablePan = false;
+      controlsRef.current.enableRotate = true;
+      controlsRef.current.enableDamping = true;
+      controlsRef.current.dampingFactor = 0.1;
+      controlsRef.current.rotateSpeed = 0.5;
+      sceneRef.current.rotation.set(0, 0, 0);
+    } else if (globeView === '3D Orthographic') {
+      if (!(cameraRef.current instanceof THREE.PerspectiveCamera)) {
+        cameraRef.current = new THREE.PerspectiveCamera(45, aspect, 0.1, 1000);
+        controlsRef.current.object = cameraRef.current;
+        sceneRef.current.add(cameraRef.current);
+      }
+      sphereRef.current.material.wireframe = false;
+      sphereRef.current.visible = true;
+      controlsRef.current.minDistance = 3;
+      controlsRef.current.maxDistance = 20;
+      controlsRef.current.zoomSpeed = 0.5;
+      controlsRef.current.enablePan = false;
+      controlsRef.current.enableRotate = true;
+      controlsRef.current.enableDamping = true;
+      controlsRef.current.dampingFactor = 0.1;
+      controlsRef.current.rotateSpeed = 0.5;
+      sceneRef.current.rotation.set(0, 0, 0);
+    }
+  }, [
+    graphicalSettings.globeView,
+    graphicalSettings.pacificCentered,
+    graphicalSettings.rivers,
+    graphicalSettings.lakes,
+    graphicalSettings.coasts,
+    graphicalSettings.bumpMapping,
+    graphicalSettings.latLonLines,
+    updateGraphicalSettings,
+    texture,
+  ]);
+
+  useEffect(() => {
+    if (graticuleRef.current) {
+      graticuleRef.current.visible = graphicalSettings.latLonLines;
+    }
+  }, [graphicalSettings.latLonLines]);
+
+  return (
+    <div
+      id="globe-container"
+      ref={mountRef}
+      style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'flex-start',
+        paddingTop: '28px',
+        height: '100vh',
+        backgroundColor: 'white',
+        overflow: 'hidden',
+        position: 'relative',
+      }}
+    >
+      {clickInfo && (
+        <Box
+          sx={{
+            position: 'absolute',
+            bottom: 16,
+            left: 16,
+            backgroundColor: 'rgba(255, 255, 255, 0.9)',
+            padding: 3,
+            borderRadius: 2,
+            boxShadow: 3,
+            zIndex: 1000,
+            minWidth: 250,
+          }}
+        >
+          <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 1 }}>
+            {clickInfo.dataset}: {clickInfo.value} {clickInfo.units}
+          </Typography>
+          <Typography variant="body1">
+            Lat: {clickInfo.lat}
+          </Typography>
+          <Typography variant="body1">
+            Lon: {clickInfo.lon}
+          </Typography>
+          <Button
+            variant="contained"
+            size="medium"
+            sx={{ marginTop: 2 }}
+            disabled
+          >
+            Timeseries
+          </Button>
+        </Box>
+      )}
+    </div>
+  );
+};
+
+export default GlobeWireframe;
