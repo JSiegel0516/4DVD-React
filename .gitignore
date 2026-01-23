@@ -21,3 +21,27 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Python
+**/__pycache__/
+**/.ipynb_checkpoints/
+.venv/
+.env
+
+# Data artifacts (exclude large datasets and binaries)
+backend/dataset/
+backend/downloads/
+src/api/backend/dataset.nc
+src/api/backend/f33d36aae69b596a2c6a27255fa9cc9d/
+**/*.nc
+**/*.zarr/
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.parquet
+
+# VS Code
+.vscode/
+
+# OS
+Thumbs.db
