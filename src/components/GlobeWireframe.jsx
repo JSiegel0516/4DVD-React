@@ -33,12 +33,15 @@ const GlobeWireframe = () => {
   const [clickInfo, setClickInfo] = useState(null);
   const [is2DMode, setIs2DMode] = useState(false);
   const [texture, setTexture] = useState(null);
+  const [textureOffsetX, setTextureOffsetX] = useState(0.5);
   const [bumpTexture, setBumpTexture] = useState(null);
   const [gridData, setGridData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [openTimeSeries, setOpenTimeSeries] = useState(false);
   const [colorMapManager, setColorMapManager] = useState(null);
   const [colorbar, setColorbar] = useState({ gradient: '', min: 0, max: 1 });
+  const fetchIdRef = useRef(0);
+  const fetchAbortRef = useRef(null);
   const { graphicalSettings, selectedDataset, selectedDate, selectedLevel, metadata, setSelectedLevel, setColormap, colorMapOpen, setColorMapOpen } = useGlobeSettings();
 
   const getFallbackUnits = (varName) => {
@@ -52,6 +55,18 @@ const GlobeWireframe = () => {
     };
     return unitMap[varName.toLowerCase()] || 'unknown';
   };
+
+  const computeTextureOffsetX = useCallback((lons, isPacificCentered) => {
+    if (!lons || lons.length === 0) return 0.5;
+    const lonMin = Math.min(...lons);
+    const lonMax = Math.max(...lons);
+    const span = lonMax - lonMin || 1;
+    const targetLon = isPacificCentered ? 180 : 0;
+    const u = (targetLon - lonMin) / span;
+    let offset = 0.5 - u;
+    offset = ((offset % 1) + 1) % 1;
+    return offset;
+  }, []);
 
   // Initialize ColorMapManager
   useEffect(() => {
@@ -109,15 +124,28 @@ const GlobeWireframe = () => {
       return;
     }
 
+    const currentFetchId = ++fetchIdRef.current;
+    if (fetchAbortRef.current) {
+      fetchAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+
     console.log('Fetching grid for', selectedDataset.name, 'on', selectedDate, 'level', selectedLevel);
     setIsLoading(true);
     const levelParam = metadata.multilevel && selectedLevel ? `&level=${selectedLevel}` : '';
-    fetch(`http://localhost:8080/api/slice?path=${encodeURIComponent(selectedDataset.relative_path)}&variable=${selectedDataset.name}&date=${selectedDate}&center=${graphicalSettings.pacificCentered ? 'pacific' : 'atlantic'}${levelParam}`)
+    fetch(`http://localhost:8080/api/slice?path=${encodeURIComponent(selectedDataset.relative_path)}&variable=${selectedDataset.name}&date=${selectedDate}&center=${graphicalSettings.pacificCentered ? 'pacific' : 'atlantic'}${levelParam}`, {
+      signal: controller.signal,
+    })
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
         return res.json();
       })
       .then((data) => {
+        if (currentFetchId !== fetchIdRef.current) {
+          console.log('Ignoring stale grid response');
+          return;
+        }
         console.log('Fetched grid data:', {
           var: data.var,
           date: data.date_selected,
@@ -137,14 +165,20 @@ const GlobeWireframe = () => {
         }
       })
       .catch((err) => {
+        if (err.name === 'AbortError') return;
         console.error('Error fetching grid data:', err);
         setGridData(null);
         setTexture(null);
         setClickInfo(null);
       })
       .finally(() => {
-        setIsLoading(false);
+        if (currentFetchId === fetchIdRef.current) {
+          setIsLoading(false);
+        }
       });
+    return () => {
+      controller.abort();
+    };
   }, [selectedDataset, selectedDate, selectedLevel, graphicalSettings.pacificCentered, metadata.multilevel]);
 
   // Generate texture
@@ -253,24 +287,23 @@ const GlobeWireframe = () => {
       newTexture.wrapS = THREE.RepeatWrapping;
       newTexture.wrapT = THREE.ClampToEdgeWrapping;
       newTexture.flipY = false;
-      // Three.js SphereGeometry UV mapping: u=0 at -180°, u=0.5 at 0°, u=1 at 180°
-      // Atlantic centered: data is -180 to 180, so we need offset 0.5 to align 0° properly
-      // Pacific centered: data is 0 to 360, so we need offset 0 (or -0.5 to center Pacific)
-      newTexture.offset = new THREE.Vector2(graphicalSettings.pacificCentered ? -0.5 : 0.5, 0);
+      const offsetX = computeTextureOffsetX(lons, graphicalSettings.pacificCentered);
+      setTextureOffsetX(offsetX);
+      newTexture.offset = new THREE.Vector2(offsetX, 0);
       setTexture(newTexture);
     } catch (err) {
       console.error('Error generating texture:', err);
       setTexture(null);
     }
-  }, [gridData, graphicalSettings.pacificCentered, metadata.colormap, colorMapManager]);
+  }, [gridData, graphicalSettings.pacificCentered, metadata.colormap, colorMapManager, computeTextureOffsetX]);
 
   // Ensure material updates when textures change
   useEffect(() => {
     if (is2DMode && planeRef.current && texture) {
       console.log('Updating plane material with texture');
-      // Use same offset as sphere for alignment
+      // 2D plane needs the computed offset because its geometry is set up for different centering
       const flatTexture = texture.clone();
-      flatTexture.offset.set(graphicalSettings.pacificCentered ? -0.5 : 0.5, 0);
+      flatTexture.offset.set(textureOffsetX, 0);
       flatTexture.repeat.set(1, 1);
       flatTexture.wrapS = THREE.RepeatWrapping;
       flatTexture.wrapT = THREE.ClampToEdgeWrapping;
@@ -300,7 +333,7 @@ const GlobeWireframe = () => {
         planeRef.current.material.needsUpdate = true;
       }
     }
-  }, [texture, bumpTexture, is2DMode]);
+  }, [texture, bumpTexture, is2DMode, textureOffsetX]);
 
   // Handle globe click with rotation correction
   const handleClick = useCallback((event) => {
@@ -688,7 +721,7 @@ const GlobeWireframe = () => {
       // Show plane with texture (clone and keep offset for alignment)
       if (planeRef.current && texture) {
         const flatTexture = texture.clone();
-        flatTexture.offset.set(graphicalSettings.pacificCentered ? -0.5 : 0.5, 0);
+        flatTexture.offset.set(textureOffsetX, 0);
         flatTexture.repeat.set(1, 1);
         flatTexture.wrapS = THREE.RepeatWrapping;
         flatTexture.wrapT = THREE.ClampToEdgeWrapping;
@@ -978,17 +1011,23 @@ const GlobeWireframe = () => {
       }
 
       if (texture) {
-        texture.offset.x = pacificCentered ? -0.5 : 0.5;
+        texture.offset.x = textureOffsetX;
         texture.needsUpdate = true;
       }
       if (bumpTexture) {
-        bumpTexture.offset.x = pacificCentered ? -0.5 : 0.5;
+        bumpTexture.offset.x = textureOffsetX;
         bumpTexture.needsUpdate = true;
       }
       
       // Update appropriate mesh based on current mode
-      if (is2DMode && planeRef.current) {
-        planeRef.current.material.map = texture;
+      if (is2DMode && planeRef.current && texture) {
+        const flatTexture = texture.clone();
+        flatTexture.offset.set(textureOffsetX, 0);
+        flatTexture.repeat.set(1, 1);
+        flatTexture.wrapS = THREE.RepeatWrapping;
+        flatTexture.wrapT = THREE.ClampToEdgeWrapping;
+        flatTexture.needsUpdate = true;
+        planeRef.current.material.map = flatTexture;
         planeRef.current.material.needsUpdate = true;
       } else if (sphereRef.current) {
         sphereRef.current.material.map = texture;
@@ -1056,6 +1095,7 @@ const GlobeWireframe = () => {
     graphicalSettings.latLonLines,
     graphicalSettings.bumpMapping,
     graphicalSettings.countries,
+    textureOffsetX,
   ]);
 
   useEffect(() => {
