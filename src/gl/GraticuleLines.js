@@ -4,7 +4,7 @@ import * as THREE from 'three';
 export function createGraticuleLines(pacificCentered = false, isMercator = false) {
   const group = new THREE.Group();
   const step = 10; // degrees
-  const radius = 2.02; // Slightly larger than globe radius (2)
+  const radius = 2.0001; // Slightly larger than globe radius (2) to prevent z-fighting
 
   const lonMin = pacificCentered ? 0 : -180;
   const lonMax = pacificCentered ? 360 : 180;
@@ -59,7 +59,7 @@ export function createGraticuleLines(pacificCentered = false, isMercator = false
   return group;
 }
 
-function latLonToVector3(lat, lon, radius = 2.02) {
+function latLonToVector3(lat, lon, radius = 2.0001) {
   const phi = (90 - lat) * (Math.PI / 180);
   const theta = lon * (Math.PI / 180);
 
