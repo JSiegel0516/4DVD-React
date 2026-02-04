@@ -39,7 +39,7 @@ const GlobeWireframe = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [openTimeSeries, setOpenTimeSeries] = useState(false);
   const [colorMapManager, setColorMapManager] = useState(null);
-  const [colorbar, setColorbar] = useState({ gradient: '', min: 0, max: 1 });
+  const [colorbar, setColorbar] = useState({ gradient: '', min: 0, max: 1, units: '' });
   const fetchIdRef = useRef(0);
   const fetchAbortRef = useRef(null);
   const { graphicalSettings, selectedDataset, selectedDate, selectedLevel, metadata, setSelectedLevel, setColormap, colorMapOpen, setColorMapOpen } = useGlobeSettings();
@@ -246,7 +246,8 @@ const GlobeWireframe = () => {
           return `${c} ${pct}%`;
         });
       const gradientCss = `linear-gradient(180deg, ${stops.join(', ')})`;
-      setColorbar({ gradient: gradientCss, min: computedMin, max: computedMax });
+      const units = metadata.units || getFallbackUnits(selectedDataset?.name);
+      setColorbar({ gradient: gradientCss, min: computedMin, max: computedMax, units });
       let invalidCount = 0;
 
       for (let i = 0; i < lats.length; i++) {
@@ -1231,29 +1232,105 @@ const GlobeWireframe = () => {
             position: 'absolute',
             right: 16,
             top: 120,
-            width: 28,
-            height: 240,
-            borderRadius: 1,
-            boxShadow: 3,
-            backgroundImage: colorbar.gradient,
-            border: '1px solid rgba(0,0,0,0.2)',
-            zIndex: 900,
             display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
+            flexDirection: 'row',
             alignItems: 'center',
-            paddingY: 1,
+            gap: 1,
+            zIndex: 900,
             cursor: 'pointer',
           }}
           onClick={() => setColorMapOpen(true)}
           aria-label="Open colormap menu"
         >
-          <Typography variant="caption" sx={{ color: '#000', fontWeight: 600 }}>
-            {Number.isFinite(colorbar.max) ? colorbar.max.toFixed(2) : ''}
-          </Typography>
-          <Typography variant="caption" sx={{ color: '#000', fontWeight: 600 }}>
-            {Number.isFinite(colorbar.min) ? colorbar.min.toFixed(2) : ''}
-          </Typography>
+          {/* Gradient bar */}
+          <Box
+            sx={{
+              width: 40,
+              height: 300,
+              backgroundImage: colorbar.gradient,
+              border: '2px solid #000',
+              borderRadius: '4px',
+              position: 'relative',
+            }}
+          >
+            {/* Tick marks */}
+            {(() => {
+              const range = colorbar.max - colorbar.min;
+              const tickCount = 7;
+              const ticks = [];
+              for (let i = 0; i < tickCount; i++) {
+                const position = (i / (tickCount - 1)) * 100;
+                ticks.push(
+                  <Box
+                    key={i}
+                    sx={{
+                      position: 'absolute',
+                      left: '100%',
+                      top: `${position}%`,
+                      width: '6px',
+                      height: '2px',
+                      backgroundColor: '#000',
+                      transform: 'translateY(-50%)',
+                    }}
+                  />
+                );
+              }
+              return ticks;
+            })()}
+          </Box>
+
+          {/* Labels */}
+          <Box
+            sx={{
+              height: 300,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+              position: 'relative',
+            }}
+          >
+            {(() => {
+              const tickCount = 7;
+              const labels = [];
+              for (let i = 0; i < tickCount; i++) {
+                const value = colorbar.max - (i / (tickCount - 1)) * (colorbar.max - colorbar.min);
+                labels.push(
+                  <Typography
+                    key={i}
+                    variant="caption"
+                    sx={{
+                      color: '#000',
+                      fontWeight: 500,
+                      fontSize: '11px',
+                      lineHeight: 1,
+                      userSelect: 'none',
+                    }}
+                  >
+                    {Number.isFinite(value) ? Math.round(value) : ''}
+                  </Typography>
+                );
+              }
+              return labels;
+            })()}
+          </Box>
+
+          {/* Unit label */}
+          {colorbar.units && (
+            <Typography
+              variant="caption"
+              sx={{
+                color: '#000',
+                fontWeight: 500,
+                fontSize: '12px',
+                writingMode: 'vertical-rl',
+                transform: 'rotate(180deg)',
+                userSelect: 'none',
+                marginLeft: '4px',
+              }}
+            >
+              {colorbar.units}
+            </Typography>
+          )}
         </Box>
       )}
 
