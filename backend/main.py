@@ -866,11 +866,35 @@ async def get_slice(
         else:
             min_val = 0.0
             max_val = 1.0
-            
+        
+        print(f"[SLICE] center={center}, atlantic={center == 'atlantic'}, pacific={center == 'pacific'}")
+        
         if center == "pacific":
-            lons = [(lon + 360) % 360 if lon < 0 else lon for lon in lons]
-            values = [row[::-1] for row in values]
-            lons = lons[::-1]
+            # For Pacific centering, we need to find the dateline (0 degrees) and roll data there
+            # Find index where longitude crosses from negative to positive (or wraps around)
+            lons_array = np.array(lons)
+            
+            # Find the "seam" - the index where we should split
+            # Look for the largest gap between consecutive longitudes
+            lon_diffs = np.diff(np.concatenate([[lons_array[-1] - 360], lons_array]))
+            seam_idx = np.argmax(lon_diffs)
+            
+            print(f"[PACIFIC] lons range: [{lons_array[0]}, ..., {lons_array[-1]}]")
+            print(f"[PACIFIC] seam_idx: {seam_idx}, lon_diffs max: {lon_diffs[seam_idx]}")
+            
+            # Roll the data and longitudes
+            values_array = np.array(values)
+            rolled_values = np.roll(values_array, -seam_idx, axis=1)
+            rolled_lons = np.roll(lons_array, -seam_idx)
+            
+            # Convert rolled lons to 0-360 range for Pacific view
+            rolled_lons = np.where(rolled_lons < 0, rolled_lons + 360, rolled_lons)
+            
+            print(f"[PACIFIC] rolled lons range: [{rolled_lons[0]}, ..., {rolled_lons[-1]}]")
+            
+            lons = rolled_lons.tolist()
+            values = rolled_values.tolist()
+        
         return {
             "var": chosen_var,
             "date_selected": date,

@@ -58,14 +58,29 @@ const GlobeWireframe = () => {
 
   const computeTextureOffsetX = useCallback((lons, isPacificCentered) => {
     if (!lons || lons.length === 0) return 0.5;
+    
     const lonMin = Math.min(...lons);
     const lonMax = Math.max(...lons);
     const span = lonMax - lonMin || 1;
-    const targetLon = isPacificCentered ? 180 : 0;
-    const u = (targetLon - lonMin) / span;
-    let offset = 0.5 - u;
-    offset = ((offset % 1) + 1) % 1;
-    return offset;
+    
+    console.log('Computing texture offset:', {
+      isPacificCentered,
+      lonMin,
+      lonMax,
+      span,
+      lonRange: [lons[0], lons[lons.length - 1]]
+    });
+    
+    if (isPacificCentered) {
+      // Data is in 0-360 range (from backend Pacific centering)
+      // Frontend coastlines are already Pacific-centered, no offset needed
+      console.log('Pacific centering: no offset');
+      return 0.0;
+    } else {
+      // For Atlantic-centered, apply offset to shift data to match Atlantic coastlines
+      console.log('Atlantic centering: applying 0.5 offset');
+      return 0.5;
+    }
   }, []);
 
   // Initialize ColorMapManager
