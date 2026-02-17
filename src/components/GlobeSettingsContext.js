@@ -3,7 +3,7 @@ import React, { createContext, useContext, useState, useMemo, useCallback, useEf
 const GlobeSettingsContext = createContext();
 
 export function GlobeSettingsProvider({ children }) {
-  const [graphicalSettings, setGraphicalSettings] = useState({
+  const defaultGraphicalSettings = {
     latLonLines: true,
     pacificCentered: false,
     globeView: '3D Orthographic',
@@ -12,6 +12,21 @@ export function GlobeSettingsProvider({ children }) {
     coasts: 'Medium',
     bumpMapping: 'None',
     countries: 'Off',
+  };
+  const [graphicalSettings, setGraphicalSettings] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem('graphicalSettings');
+      if (!stored) return defaultGraphicalSettings;
+      const parsed = JSON.parse(stored);
+      return {
+        ...defaultGraphicalSettings,
+        ...parsed,
+        bumpMapping: defaultGraphicalSettings.bumpMapping,
+      };
+    } catch (error) {
+      console.warn('Failed to load graphical settings, using defaults:', error);
+      return defaultGraphicalSettings;
+    }
   });
   const [selectedDataset, setSelectedDataset] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
@@ -51,6 +66,14 @@ export function GlobeSettingsProvider({ children }) {
       return updated;
     });
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('graphicalSettings', JSON.stringify(graphicalSettings));
+    } catch (error) {
+      console.warn('Failed to persist graphical settings:', error);
+    }
+  }, [graphicalSettings]);
 
   // Fetch metadata and dates in context to centralize logic
   useEffect(() => {

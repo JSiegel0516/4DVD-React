@@ -42,6 +42,7 @@ const GlobeWireframe = () => {
   const [colorbar, setColorbar] = useState({ gradient: '', min: 0, max: 1 });
   const fetchIdRef = useRef(0);
   const fetchAbortRef = useRef(null);
+  const bumpFetchIdRef = useRef(0);
   const { graphicalSettings, selectedDataset, selectedDate, selectedLevel, metadata, setSelectedLevel, setColormap, colorMapOpen, setColorMapOpen } = useGlobeSettings();
 
   const getFallbackUnits = (varName) => {
@@ -96,17 +97,35 @@ const GlobeWireframe = () => {
     let isMounted = true;
 
     async function fetchBumpMap() {
+      const bumpFetchId = ++bumpFetchIdRef.current;
       if (!graphicalSettings.bumpMapping || graphicalSettings.bumpMapping === 'None') {
         if (bumpTexture) {
           bumpTexture.dispose();
           setBumpTexture(null);
           console.log('Cleared bump texture (None selected)');
         }
+        if (sphereRef.current) {
+          sphereRef.current.material.normalMap = null;
+          sphereRef.current.material.normalScale = new THREE.Vector2(0, 0);
+          sphereRef.current.material.needsUpdate = true;
+        }
         return;
       }
 
+      if (sphereRef.current) {
+        sphereRef.current.material.normalMap = null;
+        sphereRef.current.material.normalScale = new THREE.Vector2(0, 0);
+        sphereRef.current.material.needsUpdate = true;
+      }
+
       console.log('Loading bump map:', graphicalSettings.bumpMapping);
-      const newBumpTexture = await loadBumpMap(graphicalSettings.bumpMapping, graphicalSettings.pacificCentered);
+      const newBumpTexture = await loadBumpMap(graphicalSettings.bumpMapping);
+      if (!isMounted || bumpFetchId !== bumpFetchIdRef.current) {
+        if (newBumpTexture) {
+          newBumpTexture.dispose();
+        }
+        return;
+      }
       if (isMounted) {
         if (bumpTexture) {
           bumpTexture.dispose();
@@ -122,7 +141,19 @@ const GlobeWireframe = () => {
     return () => {
       isMounted = false;
     };
-  }, [graphicalSettings.bumpMapping, graphicalSettings.pacificCentered]);
+  }, [graphicalSettings.bumpMapping]);
+
+  useEffect(() => {
+    if (!bumpTexture) return;
+    // Bump map assets are atlantic-centered by default. Shift when pacific is enabled.
+    bumpTexture.offset.x = graphicalSettings.pacificCentered ? 0.5 : 0.0;
+    bumpTexture.offset.y = 0.0;
+    bumpTexture.needsUpdate = true;
+    if (sphereRef.current) {
+      sphereRef.current.material.normalMap = bumpTexture;
+      sphereRef.current.material.needsUpdate = true;
+    }
+  }, [graphicalSettings.pacificCentered, bumpTexture]);
 
   // Fetch grid data
   useEffect(() => {
@@ -334,7 +365,7 @@ const GlobeWireframe = () => {
         sphereRef.current.material.normalMap = null;
         sphereRef.current.material.needsUpdate = true;
       }
-    } else if (!is2DMode && sphereRef.current && (texture || bumpTexture)) {
+    } else if (!is2DMode && sphereRef.current) {
       console.log('Updating sphere material with textures', { hasTexture: !!texture, hasBumpTexture: !!bumpTexture });
       sphereRef.current.material.map = texture;
       sphereRef.current.material.normalMap = bumpTexture;
@@ -1029,10 +1060,6 @@ const GlobeWireframe = () => {
         texture.offset.x = textureOffsetX;
         texture.needsUpdate = true;
       }
-      if (bumpTexture) {
-        bumpTexture.offset.x = textureOffsetX;
-        bumpTexture.needsUpdate = true;
-      }
       
       // Update appropriate mesh based on current mode
       if (is2DMode && planeRef.current && texture) {
@@ -1046,8 +1073,6 @@ const GlobeWireframe = () => {
         planeRef.current.material.needsUpdate = true;
       } else if (sphereRef.current) {
         sphereRef.current.material.map = texture;
-        sphereRef.current.material.normalMap = bumpTexture;
-        sphereRef.current.material.normalScale = bumpTexture ? new THREE.Vector2(3.0, 3.0) : new THREE.Vector2(0, 0);
         sphereRef.current.material.needsUpdate = true;
       }
 
@@ -1108,7 +1133,6 @@ const GlobeWireframe = () => {
     graphicalSettings.lakes,
     graphicalSettings.coasts,
     graphicalSettings.latLonLines,
-    graphicalSettings.bumpMapping,
     graphicalSettings.countries,
     textureOffsetX,
   ]);
