@@ -12,6 +12,9 @@ export function GlobeSettingsProvider({ children }) {
     coasts: 'Medium',
     bumpMapping: 'None',
     countries: 'Off',
+    smoothedGridboxes: false,
+    geographicalLines: false,
+    timezones: false,
   };
   const [graphicalSettings, setGraphicalSettings] = useState(() => {
     try {

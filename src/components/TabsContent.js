@@ -242,6 +242,51 @@ function TabsContent({ tabValue }) {
               label="Lat/Lon Lines"
               sx={{ mx: 1 }}
             />
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={graphicalSettings.smoothedGridboxes}
+                  onChange={handleContextSwitchChange}
+                  name="smoothedGridboxes"
+                  sx={{
+                    '& .MuiSwitch-switchBase.Mui-checked': { color: '#9c27b0' },
+                    '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#9c27b0' },
+                  }}
+                />
+              }
+              label="Smoothed Gridboxes"
+              sx={{ mx: 1 }}
+            />
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={graphicalSettings.geographicalLines}
+                  onChange={handleContextSwitchChange}
+                  name="geographicalLines"
+                  sx={{
+                    '& .MuiSwitch-switchBase.Mui-checked': { color: '#9c27b0' },
+                    '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#9c27b0' },
+                  }}
+                />
+              }
+              label="Geographical Lines"
+              sx={{ mx: 1 }}
+            />
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={graphicalSettings.timezones}
+                  onChange={handleContextSwitchChange}
+                  name="timezones"
+                  sx={{
+                    '& .MuiSwitch-switchBase.Mui-checked': { color: '#9c27b0' },
+                    '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#9c27b0' },
+                  }}
+                />
+              }
+              label="Timezones"
+              sx={{ mx: 1 }}
+            />
           </FormGroup>
           <Divider sx={{ my: 2 }} />
           <FormControl component="fieldset" sx={{ mb: 3 }}>
