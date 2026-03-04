@@ -37,12 +37,16 @@
     "world-atlas": "^2.0.2"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
+    "start": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
-    "backend": "cd backend && \"..\\.venv\\Scripts\\python.exe\" -m uvicorn main:app --reload --host 0.0.0.0 --port 8080",
-    "dev": "concurrently \"npm start\" \"npm run backend\" --names \"frontend,backend\" --prefix-colors \"cyan,yellow\""
+    "frontend": "vite",
+    "backend": "cd backend && \"..\\.venv\\Scripts\\python.exe\" -m uvicorn main:app --reload --host 0.0.0.0 --port 8080 --reload-dir api --reload-dir core --reload-dir models --reload-dir services",
+    "dev:frontend": "npm run frontend",
+    "dev:backend": "npm run backend",
+    "dev": "concurrently \"npm run frontend\" \"npm run backend\" --names \"frontend,backend\" --prefix-colors \"cyan,yellow\""
   },
   "eslintConfig": {
     "extends": [
@@ -63,6 +67,8 @@
     ]
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "@vitejs/plugin-react": "^5.1.4",
+    "concurrently": "^9.2.1",
+    "vite": "^7.3.1"
   }
 }
