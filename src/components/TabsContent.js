@@ -32,7 +32,7 @@ function TabsContent({ tabValue }) {
   // Fetch datasets
   useEffect(() => {
     setLoading(true);
-    fetch('http://localhost:8080/datasets')
+    fetch('/datasets')
       .then((response) => {
         if (!response.ok) throw new Error(`Failed to fetch datasets: ${response.statusText}`);
         return response.json();
@@ -42,7 +42,7 @@ function TabsContent({ tabValue }) {
         setError(null);
 
         const datasetPromises = data.map((dataset) =>
-          fetch(`http://localhost:8080/dataset_info?path=${encodeURIComponent(dataset.relative_path)}`)
+          fetch(`/dataset_info?path=${encodeURIComponent(dataset.relative_path)}`)
             .then((response) => {
               if (!response.ok) throw new Error(`Failed to fetch dataset info for ${dataset.relative_path}`);
               return response.json();

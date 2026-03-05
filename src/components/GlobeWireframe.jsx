@@ -157,16 +157,26 @@ const GlobeWireframe = () => {
 
   // Fetch grid data
   useEffect(() => {
-    if (!selectedDataset || !selectedDate || (metadata.multilevel && !selectedLevel) || isLoading) {
-      console.log('Skipping grid fetch:', {
+    if (!selectedDataset || !selectedDate) {
+      console.log('Skipping grid fetch: missing dataset/date', {
         selectedDataset: !!selectedDataset,
         selectedDate: !!selectedDate,
-        selectedLevel: !!selectedLevel,
-        isMultilevel: metadata.multilevel,
-        isLoading,
       });
-      setGridData(null);
-      setTexture(null);
+      return;
+    }
+
+    const metadataReadyForDataset = !metadata.metadata_loading && metadata.dataset_path === selectedDataset.relative_path;
+    if (!metadataReadyForDataset) {
+      console.log('Skipping grid fetch: metadata not ready for selected dataset', {
+        selectedPath: selectedDataset.relative_path,
+        metadataPath: metadata.dataset_path,
+        metadataLoading: metadata.metadata_loading,
+      });
+      return;
+    }
+
+    if (metadata.multilevel && !selectedLevel) {
+      console.log('Skipping grid fetch: multilevel dataset without selected level');
       return;
     }
 
@@ -180,7 +190,7 @@ const GlobeWireframe = () => {
     console.log('Fetching grid for', selectedDataset.name, 'on', selectedDate, 'level', selectedLevel);
     setIsLoading(true);
     const levelParam = metadata.multilevel && selectedLevel ? `&level=${selectedLevel}` : '';
-    fetch(`http://localhost:8080/api/slice?path=${encodeURIComponent(selectedDataset.relative_path)}&variable=${selectedDataset.name}&date=${selectedDate}&center=${graphicalSettings.pacificCentered ? 'pacific' : 'atlantic'}${levelParam}`, {
+    fetch(`/api/slice?path=${encodeURIComponent(selectedDataset.relative_path)}&variable=${selectedDataset.name}&date=${selectedDate}&center=${graphicalSettings.pacificCentered ? 'pacific' : 'atlantic'}${levelParam}`, {
       signal: controller.signal,
     })
       .then((res) => {
@@ -225,7 +235,7 @@ const GlobeWireframe = () => {
     return () => {
       controller.abort();
     };
-  }, [selectedDataset, selectedDate, selectedLevel, graphicalSettings.pacificCentered, metadata.multilevel]);
+  }, [selectedDataset, selectedDate, selectedLevel, graphicalSettings.pacificCentered, metadata.multilevel, metadata.metadata_loading, metadata.dataset_path]);
 
   // Generate texture
   useEffect(() => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Dialog, DialogTitle, DialogContent, DialogActions, Button, IconButton, Menu, MenuItem, Typography, FormControl, FormGroup, FormControlLabel, Checkbox, Table, TableContainer, TableHead, TableRow, TableCell, TableBody, Paper, Card, CardContent, Box } from '@mui/material';
 import MenuIcon from '@mui/icons-material/Menu';
 import ArrowRightIcon from '@mui/icons-material/ArrowRight';
@@ -27,7 +27,7 @@ function StatisticsDialog({ open, onClose, lat, lon, varName, units, datasetName
       try {
         const levelParam = metadata.multilevel && level !== 'none' ? `&level=${level}` : '';
         const response = await fetch(
-          `http://localhost:8080/point_statistics?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
+          `/point_statistics?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
         );
         if (!response.ok) throw new Error(`Failed to fetch statistics: ${response.status} ${response.statusText}`);
         const data = await response.json();
@@ -198,7 +198,9 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
   const [histogramViewerOpen, setHistogramViewerOpen] = useState(false);
   const [climatologyViewerOpen, setClimatologyViewerOpen] = useState(false);
   const [seasonalTimeseriesOpen, setSeasonalTimeseriesOpen] = useState(false);
-  const { selectedDataset, metadata } = useGlobeSettings();
+  const { selectedDataset, selectedLevel, metadata } = useGlobeSettings();
+  const fetchAbortRef = useRef(null);
+  const fetchTokenRef = useRef(0);
 
   console.log('Metadata received:', JSON.stringify(metadata, null, 2));
   console.log('datasetName:', datasetName);
@@ -211,13 +213,17 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
 
   useEffect(() => {
     if (open && metadata.multilevel && metadata.levels?.length > 0) {
-      setSelectedLevels([metadata.levels[0].toString()]);
-      console.log('Initialized selectedLevels for multilevel:', [metadata.levels[0].toString()]);
+      const hasSelectedLevel = selectedLevel !== null && selectedLevel !== undefined;
+      const preferredLevel = hasSelectedLevel ? selectedLevel.toString() : metadata.levels[0].toString();
+      const isPreferredValid = metadata.levels.some((level) => level.toString() === preferredLevel);
+      const initialLevel = isPreferredValid ? preferredLevel : metadata.levels[0].toString();
+      setSelectedLevels([initialLevel]);
+      console.log('Initialized selectedLevels for multilevel:', [initialLevel]);
     } else {
       setSelectedLevels(['none']);
       console.log('Initialized selectedLevels for single-level: ["none"]');
     }
-  }, [open, metadata.multilevel, metadata.levels]);
+  }, [open, metadata.multilevel, metadata.levels, selectedLevel]);
 
   useEffect(() => {
     if (!open || !selectedDataset || !lat || !lon || !varName) {
@@ -226,6 +232,27 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
       console.log('Skipping fetch, invalid params:', { open, selectedDataset: !!selectedDataset, lat, lon, varName });
       return;
     }
+
+    if (metadata.metadata_loading || metadata.dataset_path !== selectedDataset.relative_path) {
+      console.log('Skipping fetch, metadata not ready for selected dataset yet:', {
+        metadataLoading: metadata.metadata_loading,
+        metadataPath: metadata.dataset_path,
+        selectedPath: selectedDataset.relative_path,
+      });
+      return;
+    }
+
+    if (metadata.multilevel && (!selectedLevels || selectedLevels.length === 0)) {
+      console.log('Skipping fetch, no selected levels yet for multilevel dataset');
+      return;
+    }
+
+    const fetchToken = ++fetchTokenRef.current;
+    if (fetchAbortRef.current) {
+      fetchAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
 
     const fetchTimeSeries = async () => {
       try {
@@ -247,16 +274,67 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
           '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
         ];
 
-        // Fetch data for each level
-        for (let i = 0; i < levelsToFetch.length; i++) {
-          const level = levelsToFetch[i];
-          console.log(`Fetching time series for level: ${level === 'none' ? 'single-level' : level + ' ' + levelUnits}`);
-          const levelParam = level !== 'none' ? `&level=${level}` : '';
+        let levelResults = [];
+
+        if (metadata.multilevel && levelsToFetch.length > 0 && levelsToFetch[0] !== 'none') {
+          const levelsParam = encodeURIComponent(levelsToFetch.join(','));
           const response = await fetch(
-            `http://localhost:8080/plot_timeseries?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
+            `/plot_timeseries?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}&all_levels=true&levels=${levelsParam}`,
+            { signal: controller.signal }
           );
-          if (!response.ok) throw new Error(`Failed to fetch time series for ${level === 'none' ? 'single-level' : 'level ' + level}: ${response.status} ${response.statusText}`);
-          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(`Failed to fetch multilevel time series: ${response.status} ${response.statusText}`);
+          }
+
+          const payload = await response.json();
+          const returnedLevels = Array.isArray(payload?.levels) ? payload.levels : [];
+          const seriesMap = payload?.series || {};
+          const seriesEntries = Object.entries(seriesMap);
+
+          const getSeriesForLevel = (resolvedLevel) => {
+            const exact = seriesMap[String(resolvedLevel)];
+            if (exact) return exact;
+
+            const levelNum = Number(resolvedLevel);
+            if (!Number.isFinite(levelNum)) return null;
+
+            for (const [key, value] of seriesEntries) {
+              const keyNum = Number(key);
+              if (Number.isFinite(keyNum) && Math.abs(keyNum - levelNum) < 1e-6) {
+                return value;
+              }
+            }
+            return null;
+          };
+
+          levelResults = returnedLevels.map((resolvedLevel, idx) => ({
+            level: resolvedLevel,
+            index: idx,
+            data: getSeriesForLevel(resolvedLevel) || { times: [], values: [] }
+          }));
+        } else {
+          levelResults = await Promise.all(
+            levelsToFetch.map(async (level, i) => {
+              console.log(`Fetching time series for level: ${level === 'none' ? 'single-level' : level + ' ' + levelUnits}`);
+              const levelParam = level !== 'none' ? `&level=${level}` : '';
+              const response = await fetch(
+                `/plot_timeseries?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`,
+                { signal: controller.signal }
+              );
+              if (!response.ok) throw new Error(`Failed to fetch time series for ${level === 'none' ? 'single-level' : 'level ' + level}: ${response.status} ${response.statusText}`);
+              const data = await response.json();
+              return { level, index: i, data };
+            })
+          );
+        }
+
+        if (fetchToken !== fetchTokenRef.current) {
+          console.log('Ignoring stale timeseries response');
+          return;
+        }
+
+        for (const result of levelResults) {
+          const { level, index, data } = result;
           console.log('Fetched data from backend:', JSON.stringify(data, null, 2));
           
           // Handle new dict format from backend (times, values, title, xLabel, yLabel, varName, units)
@@ -274,7 +352,7 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
           }
           
           const levelKey = level === 'none' ? 'Single Level' : `${level} ${levelUnits}`;
-          colors[levelKey] = baseColors[i % baseColors.length];
+          colors[levelKey] = baseColors[index % baseColors.length];
           console.log('Processing levelKey:', levelKey, 'with', xValues.length, 'data points');
           // Map Plotly traces to data points
           for (let j = 0; j < xValues.length; j++) {
@@ -294,6 +372,7 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
         console.log('Set chartData with', chartArray.length, 'points');
         setError(null);
       } catch (err) {
+        if (err.name === 'AbortError') return;
         console.error('Error fetching time series:', err);
         setError(`Failed to load time series data: ${err.message}`);
         setChartData([]);
@@ -301,7 +380,10 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
     };
 
     fetchTimeSeries();
-  }, [open, lat, lon, varName, units, selectedDataset, selectedLevels, metadata.multilevel, metadata.levels, metadata.level_units, datasetName]);
+    return () => {
+      controller.abort();
+    };
+  }, [open, lat, lon, varName, selectedDataset, selectedLevels, metadata.multilevel, metadata.levels, metadata.level_units, metadata.metadata_loading, metadata.dataset_path, datasetName]);
 
 
   const handleLevelChange = useCallback((event) => {

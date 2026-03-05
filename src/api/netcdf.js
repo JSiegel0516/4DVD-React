@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
+const BASE = import.meta.env.VITE_API_BASE || "";
 
 /**
  * Fetch dataset metadata from FastAPI.
@@ -26,7 +26,7 @@ export async function getDates() {
  * @param {number} downsample - optional step for thinning grid
  */
 export async function getGrid(variable, date, downsample = 2) {
-  const url = new URL(`${BASE}/slice`);
+  const url = new URL(`${BASE}/slice`, window.location.origin);
   if (variable) url.searchParams.set("var", variable);
   if (date) url.searchParams.set("date", date);
   url.searchParams.set("downsample", downsample);
@@ -43,7 +43,7 @@ export async function getGrid(variable, date, downsample = 2) {
  * @param {string} variable - variable name
  */
 export async function getTimeSeries(lat, lon, variable) {
-  const url = new URL(`${BASE}/timeseries`);
+  const url = new URL(`${BASE}/timeseries`, window.location.origin);
   url.searchParams.set("lat", lat);
   url.searchParams.set("lon", lon);
   if (variable) url.searchParams.set("var", variable);

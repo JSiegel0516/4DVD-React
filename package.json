@@ -43,7 +43,7 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "frontend": "vite",
-    "backend": "cd backend && \"..\\.venv\\Scripts\\python.exe\" -m uvicorn main:app --reload --host 0.0.0.0 --port 8080 --reload-dir api --reload-dir core --reload-dir models --reload-dir services",
+    "backend": "cd backend && \"..\\.venv\\Scripts\\python.exe\" -m uvicorn main:app --reload --host 0.0.0.0 --port 8080 --reload-dir api --reload-dir core --reload-dir models --reload-dir services --reload-include main.py",
     "dev:frontend": "npm run frontend",
     "dev:backend": "npm run backend",
     "dev": "concurrently \"npm run frontend\" \"npm run backend\" --names \"frontend,backend\" --prefix-colors \"cyan,yellow\""

@@ -27,7 +27,7 @@ function ComputeStats({ open, onClose, lat, lon, varName, selectedDataset, selec
         const level = metadata.multilevel && selectedLevels.length > 0 ? selectedLevels[0] : 'none';
         const levelParam = level !== 'none' ? `&level=${level}` : '';
         const response = await fetch(
-          `http://localhost:8080/point_statistics?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
+          `/point_statistics?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
         );
         if (!response.ok) throw new Error(`Failed to fetch statistics: ${response.status} ${response.statusText}`);
         const data = await response.json();
