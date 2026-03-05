@@ -16,21 +16,7 @@ export function GlobeSettingsProvider({ children }) {
     geographicalLines: false,
     timezones: false,
   };
-  const [graphicalSettings, setGraphicalSettings] = useState(() => {
-    try {
-      const stored = window.localStorage.getItem('graphicalSettings');
-      if (!stored) return defaultGraphicalSettings;
-      const parsed = JSON.parse(stored);
-      return {
-        ...defaultGraphicalSettings,
-        ...parsed,
-        bumpMapping: defaultGraphicalSettings.bumpMapping,
-      };
-    } catch (error) {
-      console.warn('Failed to load graphical settings, using defaults:', error);
-      return defaultGraphicalSettings;
-    }
-  });
+  const [graphicalSettings, setGraphicalSettings] = useState(defaultGraphicalSettings);
   const [selectedDataset, setSelectedDataset] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedLevel, setSelectedLevel] = useState(null);
@@ -71,14 +57,6 @@ export function GlobeSettingsProvider({ children }) {
       return updated;
     });
   }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('graphicalSettings', JSON.stringify(graphicalSettings));
-    } catch (error) {
-      console.warn('Failed to persist graphical settings:', error);
-    }
-  }, [graphicalSettings]);
 
   // Fetch metadata and dates in context to centralize logic
   useEffect(() => {
