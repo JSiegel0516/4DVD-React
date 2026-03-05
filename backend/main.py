@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict
 import os
 import json
+import time
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ import cftime
 from scipy.stats import skew, kurtosis
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock
 
 # --- Config ---
 ROOT_DIR = r"C:\Users\jsieg\Documents\4dvd-clone\backend\dataset"
@@ -28,11 +30,74 @@ DATASET_INFO_CACHE = {}
 DATASET_DATES_CACHE = {}
 TIMESERIES_PLOT_CACHE = {}  # Cache timeseries plots
 TIMESERIES_DATA_CACHE = {}  # Cache raw timeseries data
+TIMESERIES_PLOT_CACHE_META = {}
+TIMESERIES_PLOT_CACHE_TTL_SECONDS = 900
+TIMESERIES_PLOT_CACHE_MAX_ITEMS = 400
+OPEN_DATASET_CACHE = {}
+OPEN_DATASET_CACHE_MAX_ITEMS = 8
+DATASET_CACHE_LOCK = Lock()
+DATASET_OPEN_LOCKS: Dict[str, Lock] = {}
+DATASETS_LIST_CACHE: List[Dict[str, str]] = []
+DATASETS_LIST_CACHE_TS = 0.0
+DATASETS_LIST_CACHE_TTL_SECONDS = 30
+CACHE_DEBUG_LOGS = os.getenv("CACHE_DEBUG_LOGS", "0") == "1"
 
 # --- Request deduplication ---
 import asyncio
 REQUEST_LOCKS = {}  # Prevent duplicate concurrent requests
 LOCK_TIMEOUT = 30  # seconds
+
+def _cache_log(message: str) -> None:
+    if CACHE_DEBUG_LOGS:
+        print(f"[CACHE] {message}")
+
+def _normalize_timeseries_cache_key(
+    path: str,
+    variable: Optional[str],
+    lat: float,
+    lon: float,
+    level: Optional[float],
+    downsample: int,
+) -> str:
+    """Normalize key parts for better cache hit rate on equivalent float inputs."""
+    level_key = "none" if level is None else f"{float(level):.3f}"
+    return f"{path}||{variable or ''}||{float(lat):.4f}||{float(lon):.4f}||{level_key}||{int(downsample)}"
+
+def _get_cached_timeseries(cache_key: str):
+    now = time.time()
+    entry = TIMESERIES_PLOT_CACHE_META.get(cache_key)
+    if not entry:
+        return None
+
+    if (now - entry["created_at"]) > TIMESERIES_PLOT_CACHE_TTL_SECONDS:
+        TIMESERIES_PLOT_CACHE.pop(cache_key, None)
+        TIMESERIES_PLOT_CACHE_META.pop(cache_key, None)
+        REQUEST_LOCKS.pop(cache_key, None)
+        return None
+
+    entry["last_access"] = now
+    return TIMESERIES_PLOT_CACHE.get(cache_key)
+
+def _set_cached_timeseries(cache_key: str, data: Dict):
+    now = time.time()
+    TIMESERIES_PLOT_CACHE[cache_key] = data
+    TIMESERIES_PLOT_CACHE_META[cache_key] = {
+        "created_at": now,
+        "last_access": now,
+    }
+
+    if len(TIMESERIES_PLOT_CACHE) <= TIMESERIES_PLOT_CACHE_MAX_ITEMS:
+        return
+
+    sorted_keys = sorted(
+        TIMESERIES_PLOT_CACHE_META.items(),
+        key=lambda item: item[1].get("last_access", 0.0)
+    )
+    to_remove = len(TIMESERIES_PLOT_CACHE) - TIMESERIES_PLOT_CACHE_MAX_ITEMS
+    for key, _ in sorted_keys[:to_remove]:
+        TIMESERIES_PLOT_CACHE.pop(key, None)
+        TIMESERIES_PLOT_CACHE_META.pop(key, None)
+        REQUEST_LOCKS.pop(key, None)
 
 # --- Custom JSON Encoder for NaN ---
 class NumpyEncoder(json.JSONEncoder):
@@ -46,6 +111,104 @@ class NumpyEncoder(json.JSONEncoder):
         return super().default(obj)
 
 # --- Utils ---
+def _evict_dataset_cache_if_needed():
+    if len(OPEN_DATASET_CACHE) <= OPEN_DATASET_CACHE_MAX_ITEMS:
+        return
+    oldest_key = min(OPEN_DATASET_CACHE.items(), key=lambda item: item[1]["last_access"])[0]
+    entry = OPEN_DATASET_CACHE.pop(oldest_key, None)
+    DATASET_OPEN_LOCKS.pop(oldest_key, None)
+    _cache_log(f"dataset evict key={oldest_key}")
+    if entry is not None:
+        try:
+            entry["ds"].close()
+        except Exception:
+            pass
+
+def _canonicalize_dataset_path(path: str) -> str:
+    """Resolve equivalent path spellings to a single cache key."""
+    return str(Path(path).resolve())
+
+def _normalize_time_coord_if_numeric(ds: xr.Dataset) -> xr.Dataset:
+    if "time" not in ds.coords:
+        return ds
+    time_vals = ds["time"].values
+    if len(time_vals) == 0:
+        return ds
+    if isinstance(time_vals[0], (cftime.DatetimeNoLeap, cftime.DatetimeGregorian)):
+        return ds
+    if not pd.api.types.is_numeric_dtype(time_vals):
+        return ds
+    units = ds["time"].attrs.get("units", "days since 1800-01-01")
+    ref_date = units.split("since")[-1].strip()
+    ds["time"] = pd.to_datetime(ref_date) + pd.to_timedelta(time_vals, unit="D")
+    return ds
+
+def get_cached_dataset(path: str) -> xr.Dataset:
+    path_str = _canonicalize_dataset_path(path)
+    now = time.time()
+
+    entry = OPEN_DATASET_CACHE.get(path_str)
+    if entry is not None:
+        entry["last_access"] = now
+        _cache_log(f"dataset hit key={path_str}")
+        return entry["ds"]
+
+    _cache_log(f"dataset miss key={path_str}")
+
+    with DATASET_CACHE_LOCK:
+        entry = OPEN_DATASET_CACHE.get(path_str)
+        if entry is not None:
+            entry["last_access"] = now
+            _cache_log(f"dataset hit-after-lock key={path_str}")
+            return entry["ds"]
+
+        open_lock = DATASET_OPEN_LOCKS.get(path_str)
+        if open_lock is None:
+            open_lock = Lock()
+            DATASET_OPEN_LOCKS[path_str] = open_lock
+
+    # Only one request opens the same dataset path at a time.
+    with open_lock:
+        now = time.time()
+        with DATASET_CACHE_LOCK:
+            entry = OPEN_DATASET_CACHE.get(path_str)
+            if entry is not None:
+                entry["last_access"] = now
+                _cache_log(f"dataset hit-after-open-lock key={path_str}")
+                return entry["ds"]
+
+        if not path_str.endswith('.zarr'):
+            raise ValueError(f"Only zarr stores are supported (got: {path_str})")
+
+        try:
+            _cache_log(f"dataset open consolidated key={path_str}")
+            ds = xr.open_zarr(path_str, consolidated=True)
+        except Exception:
+            _cache_log(f"dataset open fallback unconsolidated key={path_str}")
+            ds = xr.open_zarr(path_str, consolidated=False)
+
+        ds = _normalize_time_coord_if_numeric(ds)
+
+        with DATASET_CACHE_LOCK:
+            OPEN_DATASET_CACHE[path_str] = {
+                "ds": ds,
+                "last_access": now,
+            }
+            _cache_log(f"dataset store key={path_str}")
+            _evict_dataset_cache_if_needed()
+
+        return ds
+
+def clear_open_dataset_cache():
+    for entry in OPEN_DATASET_CACHE.values():
+        try:
+            entry["ds"].close()
+        except Exception:
+            pass
+    OPEN_DATASET_CACHE.clear()
+    DATASET_OPEN_LOCKS.clear()
+    _cache_log("dataset cache cleared")
+
 @contextmanager
 def open_dataset(path: str):
     """Open a dataset (zarr store only) with context manager to ensure cleanup."""
@@ -147,30 +310,22 @@ def choose_best_variable(ds: xr.Dataset, fallback: str = "precip") -> str:
 def open_dataset_flexible(path: str, variable_of_interest: Optional[str] = None):
     """Open a dataset (zarr), pick a variable, and detect multi-level structure."""
     try:
-        with open_dataset(path) as ds:
-            if "time" in ds.coords:
-                time_vals = ds["time"].values
-                if isinstance(time_vals[0], (cftime.DatetimeNoLeap, cftime.DatetimeGregorian)):
-                    pass
-                elif pd.api.types.is_numeric_dtype(time_vals):
-                    units = ds["time"].attrs.get("units", "days since 1800-01-01")
-                    ref_date = units.split("since")[-1].strip()
-                    ds["time"] = pd.to_datetime(ref_date) + pd.to_timedelta(time_vals, unit="D")
-            if variable_of_interest and variable_of_interest not in ds.data_vars:
-                raise ValueError(f"Variable {variable_of_interest} not found in dataset. Available variables: {list(ds.data_vars)}")
-            chosen_var = variable_of_interest if variable_of_interest in ds.data_vars else choose_best_variable(ds)
-            print(f"Chosen variable: {chosen_var}")
-            da = ds[chosen_var]
-            units = da.attrs.get("units", guess_units(chosen_var))
-            multilevel = False
-            levels = None
-            level_units = ""
-            if "level" in da.dims or "plev" in da.dims:
-                multilevel = True
-                level_dim = "level" if "level" in da.dims else "plev"
-                levels = da[level_dim].values
-                level_units = ds[level_dim].attrs.get("units", "mb")
-            return ds, chosen_var, multilevel, levels, units, level_units
+        ds = get_cached_dataset(path)
+        if variable_of_interest and variable_of_interest not in ds.data_vars:
+            raise ValueError(f"Variable {variable_of_interest} not found in dataset. Available variables: {list(ds.data_vars)}")
+        chosen_var = variable_of_interest if variable_of_interest in ds.data_vars else choose_best_variable(ds)
+        print(f"Chosen variable: {chosen_var}")
+        da = ds[chosen_var]
+        units = da.attrs.get("units", guess_units(chosen_var))
+        multilevel = False
+        levels = None
+        level_units = ""
+        if "level" in da.dims or "plev" in da.dims:
+            multilevel = True
+            level_dim = "level" if "level" in da.dims else "plev"
+            levels = da[level_dim].values
+            level_units = ds[level_dim].attrs.get("units", "mb")
+        return ds, chosen_var, multilevel, levels, units, level_units
     except Exception as e:
         print(f"Error in open_dataset_flexible: {str(e)}")
         raise
@@ -178,6 +333,169 @@ def open_dataset_flexible(path: str, variable_of_interest: Optional[str] = None)
 def is_multilevel(da: xr.DataArray) -> bool:
     """Detect if a DataArray has vertical levels (pressure or height)."""
     return "level" in da.dims or "plev" in da.dims
+
+def _get_level_dim(da: xr.DataArray) -> Optional[str]:
+    if "level" in da.dims:
+        return "level"
+    if "plev" in da.dims:
+        return "plev"
+    return None
+
+def _parse_levels_csv(levels_csv: Optional[str]) -> Optional[List[float]]:
+    if not levels_csv:
+        return None
+    out = []
+    for item in levels_csv.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        out.append(float(text))
+    return out if out else None
+
+def _safe_datetime_index(times: np.ndarray) -> Optional[pd.DatetimeIndex]:
+    """Build DatetimeIndex when representable by pandas; otherwise return None.
+
+    Some climate datasets use years outside pandas ns bounds (e.g., year 0001).
+    In that case we keep processing by position without datetime indexing.
+    """
+    if times.size == 0:
+        return pd.DatetimeIndex([])
+
+    try:
+        # Fast path for common ISO date strings.
+        parsed = pd.to_datetime(times, format="%Y-%m-%d", errors="coerce")
+        if hasattr(parsed, "notna") and bool(parsed.notna().all()):
+            return pd.DatetimeIndex(parsed)
+    except Exception:
+        pass
+
+    try:
+        parsed = pd.to_datetime(times, errors="coerce")
+        if hasattr(parsed, "notna") and bool(parsed.notna().all()):
+            return pd.DatetimeIndex(parsed)
+    except Exception:
+        return None
+
+    return None
+
+def _apply_1d_postprocess(
+    times: np.ndarray,
+    vals: np.ndarray,
+    downsample: int = 0,
+    smooth_window: int = 1,
+    resample_rule: Optional[str] = None,
+    normalize: bool = False,
+    detrend: bool = False,
+):
+    if times.size == 0 or vals.size == 0:
+        return np.array([]), np.array([])
+
+    dt_index = _safe_datetime_index(times)
+    has_datetime_index = dt_index is not None
+    if has_datetime_index:
+        series = pd.Series(vals, index=dt_index).sort_index()
+    else:
+        # Fallback for out-of-bounds dates (e.g., 0001-01-01).
+        series = pd.Series(vals, index=np.arange(len(vals), dtype=int))
+
+    if detrend and len(series) > 1:
+        x = np.arange(len(series), dtype=float)
+        coeffs = np.polyfit(x, series.values.astype(float), 1)
+        series = pd.Series(series.values - (coeffs[0] * x + coeffs[1]), index=series.index)
+
+    if smooth_window and smooth_window > 1:
+        series = series.rolling(window=int(smooth_window), min_periods=1, center=True).mean()
+
+    if resample_rule and has_datetime_index:
+        series = series.resample(resample_rule).mean()
+    elif resample_rule and not has_datetime_index:
+        _cache_log("resample skipped: times outside pandas datetime bounds")
+
+    if normalize and len(series) > 0:
+        std = float(series.std(ddof=0))
+        if std > 0:
+            series = (series - float(series.mean())) / std
+
+    series = series.dropna()
+
+    out_vals = series.to_numpy(dtype=float)
+    if has_datetime_index:
+        out_times = series.index.strftime("%Y-%m-%d").to_numpy()
+    else:
+        # Map surviving positional rows back to original time labels.
+        out_times = np.asarray(times, dtype=str)[series.index.to_numpy(dtype=int)]
+
+    if downsample and downsample > 1:
+        out_times = out_times[::downsample]
+        out_vals = out_vals[::downsample]
+
+    return out_times, out_vals
+
+def _build_timeseries_payload_from_point(
+    point: xr.DataArray,
+    lat: float,
+    lon: float,
+    level: Optional[float] = None,
+    downsample: int = 0,
+    smooth_window: int = 1,
+    resample_rule: Optional[str] = None,
+    normalize: bool = False,
+    detrend: bool = False,
+):
+    times = np.array(iso_times_from_coord(point["time"]))
+    vals = point.values.astype(float)
+    return _build_timeseries_payload_from_arrays(
+        times=times,
+        vals=vals,
+        lat=lat,
+        lon=lon,
+        var_name=point.name or "Variable",
+        units=point.attrs.get('units', ''),
+        level=level,
+        downsample=downsample,
+        smooth_window=smooth_window,
+        resample_rule=resample_rule,
+        normalize=normalize,
+        detrend=detrend,
+    )
+
+def _build_timeseries_payload_from_arrays(
+    times: np.ndarray,
+    vals: np.ndarray,
+    lat: float,
+    lon: float,
+    var_name: str,
+    units: str,
+    level: Optional[float] = None,
+    downsample: int = 0,
+    smooth_window: int = 1,
+    resample_rule: Optional[str] = None,
+    normalize: bool = False,
+    detrend: bool = False,
+):
+    mask = np.isfinite(vals)
+    times = times[mask]
+    vals = vals[mask]
+
+    times, vals = _apply_1d_postprocess(
+        times,
+        vals,
+        downsample=downsample,
+        smooth_window=smooth_window,
+        resample_rule=resample_rule,
+        normalize=normalize,
+        detrend=detrend,
+    )
+
+    return {
+        "times": times.tolist(),
+        "values": vals.tolist(),
+        "title": f"Time Series at ({lat}N, {lon}E)" + (f", level={level}" if level is not None else ""),
+        "xLabel": "Time",
+        "yLabel": f"{var_name} ({units})",
+        "varName": var_name,
+        "units": units,
+    }
 
 def select_time_safe(da, date_str: str):
     """Select a time slice safely for both cftime and pandas time coords."""
@@ -310,7 +628,19 @@ def compute_point_statistics(da: xr.DataArray, lat: float, lon: float, level: Op
     }
     return pd.DataFrame([stats], index=[f"({lat:.2f}, {lon:.2f})"])
 
-def plot_point_timeseries(da: xr.DataArray, lat: float, lon: float, level: Optional[float] = None, downsample: int = 0):
+def plot_point_timeseries(
+    da: xr.DataArray,
+    lat: float,
+    lon: float,
+    level: Optional[float] = None,
+    downsample: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    smooth_window: int = 1,
+    resample_rule: Optional[str] = None,
+    normalize: bool = False,
+    detrend: bool = False,
+):
     """Build raw time series data for a location.
 
     Args:
@@ -320,30 +650,118 @@ def plot_point_timeseries(da: xr.DataArray, lat: float, lon: float, level: Optio
         Dict with 'times', 'values', and 'metadata' keys.
     """
     point = da.sel(lat=lat, lon=lon, method="nearest")
+    if start_date or end_date:
+        point = point.sel(time=slice(start_date, end_date))
     if is_multilevel(da):
+        level_dim = _get_level_dim(da)
+        if level_dim is None:
+            raise ValueError("Multilevel data missing level dimension")
         if level is None:
-            level = float(point["level"].values[0])
-        point = point.sel(level=level, method="nearest")
-    times = iso_times_from_coord(point["time"])
-    vals = point.values.astype(float)
-    mask = np.isfinite(vals)
-    times = np.array(times)[mask]
-    vals = vals[mask]
-    
-    # Downsample if requested
-    if downsample > 1:
-        times = times[::downsample]
-        vals = vals[::downsample]
-    
-    # Return raw data instead of Plotly figure to avoid binary encoding issues
+            level = float(point[level_dim].values[0])
+        point = point.sel({level_dim: level}, method="nearest")
+        level = float(point[level_dim].values)
+    return _build_timeseries_payload_from_point(
+        point,
+        lat=lat,
+        lon=lon,
+        level=level if is_multilevel(da) else None,
+        downsample=downsample,
+        smooth_window=smooth_window,
+        resample_rule=resample_rule,
+        normalize=normalize,
+        detrend=detrend,
+    )
+
+def plot_point_timeseries_multilevel(
+    da: xr.DataArray,
+    lat: float,
+    lon: float,
+    levels: Optional[List[float]] = None,
+    downsample: int = 0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    smooth_window: int = 1,
+    resample_rule: Optional[str] = None,
+    normalize: bool = False,
+    detrend: bool = False,
+):
+    if not is_multilevel(da):
+        return {
+            "multilevel": False,
+            "series": {
+                "single": plot_point_timeseries(
+                    da,
+                    lat=lat,
+                    lon=lon,
+                    level=None,
+                    downsample=downsample,
+                    start_date=start_date,
+                    end_date=end_date,
+                    smooth_window=smooth_window,
+                    resample_rule=resample_rule,
+                    normalize=normalize,
+                    detrend=detrend,
+                )
+            },
+            "levels": [],
+            "level_dim": None,
+        }
+
+    level_dim = _get_level_dim(da)
+    if level_dim is None:
+        raise ValueError("Multilevel data missing level dimension")
+
+    point = da.sel(lat=lat, lon=lon, method="nearest")
+    if start_date or end_date:
+        point = point.sel(time=slice(start_date, end_date))
+
+    available_levels = np.asarray(point[level_dim].values, dtype=float)
+    if available_levels.size == 0:
+        raise ValueError("No levels found for multilevel timeseries extraction")
+
+    if levels:
+        selected_indices: List[int] = []
+        for requested in levels:
+            idx = int(np.abs(available_levels - float(requested)).argmin())
+            if idx not in selected_indices:
+                selected_indices.append(idx)
+    else:
+        selected_indices = list(range(int(available_levels.size)))
+
+    point_levels = point.isel({level_dim: selected_indices})
+    shared_times = np.array(iso_times_from_coord(point_levels["time"]))
+    var_name = point_levels.name or "Variable"
+    units = point_levels.attrs.get("units", "")
+
+    series = {}
+    resolved_levels = []
+    resolved_level_values = np.asarray(point_levels[level_dim].values, dtype=float)
+    for idx, resolved_level in enumerate(resolved_level_values.tolist()):
+        vals = np.asarray(point_levels.isel({level_dim: idx}).values, dtype=float)
+        resolved_level = float(resolved_level)
+        resolved_levels.append(resolved_level)
+        series[str(resolved_level)] = _build_timeseries_payload_from_arrays(
+            times=shared_times,
+            vals=vals,
+            lat=lat,
+            lon=lon,
+            var_name=var_name,
+            units=units,
+            level=resolved_level,
+            downsample=downsample,
+            smooth_window=smooth_window,
+            resample_rule=resample_rule,
+            normalize=normalize,
+            detrend=detrend,
+        )
+
     return {
-        "times": times.tolist(),
-        "values": vals.tolist(),
-        "title": f"Time Series at ({lat}N, {lon}E)" + (f", level={level}" if is_multilevel(da) else ""),
-        "xLabel": "Time",
-        "yLabel": f"{point.name} ({point.attrs.get('units','')})",
-        "varName": point.name or "Variable",
-        "units": point.attrs.get('units', '')
+        "multilevel": True,
+        "level_dim": level_dim,
+        "levels": resolved_levels,
+        "series": series,
+        "varName": da.name or "Variable",
+        "units": da.attrs.get('units', ''),
     }
 
 def plot_point_histogram(da: xr.DataArray, lat: float, lon: float, level: Optional[float] = None, bins: int = 30):
@@ -670,7 +1088,13 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -737,10 +1161,22 @@ def list_datasets() -> List[Dict[str, str]]:
                 })
     return datasets
 
+def get_cached_datasets(force_refresh: bool = False) -> List[Dict[str, str]]:
+    """Return cached datasets list when fresh to avoid repeated disk scans."""
+    global DATASETS_LIST_CACHE, DATASETS_LIST_CACHE_TS
+    now = time.time()
+    if not force_refresh and DATASETS_LIST_CACHE and (now - DATASETS_LIST_CACHE_TS) < DATASETS_LIST_CACHE_TTL_SECONDS:
+        return DATASETS_LIST_CACHE
+
+    datasets = list_datasets()
+    DATASETS_LIST_CACHE = datasets
+    DATASETS_LIST_CACHE_TS = now
+    return datasets
+
 @app.get("/datasets", response_model=List[Dict[str, str]])
-async def get_datasets():
+async def get_datasets(refresh: bool = Query(False, description="Force refresh dataset scan, bypassing cache")):
     """List available datasets (zarr only) with paths and metadata."""
-    return list_datasets()
+    return get_cached_datasets(force_refresh=refresh)
 
 @app.get("/dataset_info")
 async def get_dataset_info(
@@ -749,16 +1185,22 @@ async def get_dataset_info(
     cache_bust: Optional[str] = Query(None, description="Cache busting param (frontend should send a random string when switching datasets)")
 ):
     """Get information about the dataset: name, variables, chosen variable, colormap, multilevel, levels, units."""
-    cache_key = f"{path}||{variable or ''}"
+    full_path = sanitize_path(path)
+    canonical_path = _canonicalize_dataset_path(full_path)
+    cache_key = f"{canonical_path}||{variable or ''}"
+
     # If cache_bust is set, skip cache
     if not cache_bust and cache_key in DATASET_INFO_CACHE:
+        _cache_log(f"dataset_info hit key={cache_key}")
         return DATASET_INFO_CACHE[cache_key]
-    full_path = sanitize_path(path)
+
+    _cache_log(f"dataset_info miss key={cache_key} cache_bust={'1' if cache_bust else '0'}")
+
     try:
         ds, chosen_var, multilevel, levels, units, level_units = open_dataset_flexible(full_path, variable)
         cmap = guess_cmap_name(chosen_var, units)
         variables = list(ds.data_vars)
-        dataset_name = os.path.relpath(full_path, ROOT_DIR).split(os.sep)[0]
+        dataset_name = os.path.relpath(canonical_path, ROOT_DIR).split(os.sep)[0]
         result = {
             "dataset_name": dataset_name,
             "variables": variables,
@@ -770,6 +1212,7 @@ async def get_dataset_info(
             "units": units
         }
         DATASET_INFO_CACHE[cache_key] = result
+        _cache_log(f"dataset_info store key={cache_key}")
         return result
     except FileNotFoundError:
         return JSONResponse(status_code=404, content={"error": f"Dataset file not found: {path}"})
@@ -782,10 +1225,16 @@ async def get_dataset_info(
 
 @app.post("/clear_caches")
 async def clear_caches():
+    global DATASETS_LIST_CACHE, DATASETS_LIST_CACHE_TS
     DATASET_INFO_CACHE.clear()
     DATASET_DATES_CACHE.clear()
     TIMESERIES_PLOT_CACHE.clear()
+    TIMESERIES_PLOT_CACHE_META.clear()
     TIMESERIES_DATA_CACHE.clear()
+    REQUEST_LOCKS.clear()
+    clear_open_dataset_cache()
+    DATASETS_LIST_CACHE = []
+    DATASETS_LIST_CACHE_TS = 0.0
     return {"status": "all caches cleared"}
 
 @app.get("/dataset_dates")
@@ -793,28 +1242,35 @@ async def get_dataset_dates(
     path: str = Query(..., description="Relative path to the zarr store from dataset root")
 ):
     """Get available dates for the dataset, including first and last year."""
-    if path in DATASET_DATES_CACHE:
-        return DATASET_DATES_CACHE[path]
-    
     full_path = sanitize_path(path)
+    canonical_path = _canonicalize_dataset_path(full_path)
+
+    if canonical_path in DATASET_DATES_CACHE:
+        _cache_log(f"dataset_dates hit key={canonical_path}")
+        return DATASET_DATES_CACHE[canonical_path]
+
+    _cache_log(f"dataset_dates miss key={canonical_path}")
+
     try:
-        with open_dataset(full_path) as ds:
-            if "time" not in ds.coords:
-                print(f"No time dimension found in {full_path}")
-                result = {"dates": [], "first_year": None, "last_year": None}
-                DATASET_DATES_CACHE[path] = result
-                return result
-            dates = iso_times_from_coord(ds["time"])
-            years = sorted(list(set(date.split('-')[0] for date in dates)))
-            first_year = years[0] if years else None
-            last_year = years[-1] if years else None
-            result = {
-                "dates": sorted(dates),
-                "first_year": first_year,
-                "last_year": last_year
-            }
-            DATASET_DATES_CACHE[path] = result
+        ds = get_cached_dataset(full_path)
+        if "time" not in ds.coords:
+            print(f"No time dimension found in {full_path}")
+            result = {"dates": [], "first_year": None, "last_year": None}
+            DATASET_DATES_CACHE[canonical_path] = result
+            _cache_log(f"dataset_dates store key={canonical_path}")
             return result
+        dates = iso_times_from_coord(ds["time"])
+        years = sorted(list(set(date.split('-')[0] for date in dates)))
+        first_year = years[0] if years else None
+        last_year = years[-1] if years else None
+        result = {
+            "dates": sorted(dates),
+            "first_year": first_year,
+            "last_year": last_year
+        }
+        DATASET_DATES_CACHE[canonical_path] = result
+        _cache_log(f"dataset_dates store key={canonical_path}")
+        return result
     except Exception as e:
         print(f"Error in get_dataset_dates for {full_path}: {str(e)}")
         return JSONResponse(status_code=500, content={"error": f"Failed to read dates: {str(e)}"})
@@ -840,37 +1296,88 @@ async def get_slice(
         ds, chosen_var, multilevel, levels, units, level_units = open_dataset_flexible(full_path, variable)
         da = ds[chosen_var]
         da = select_time_safe(da, date)
-        if multilevel and level is not None:
-            da = da.sel(level=level, method="nearest") if "level" in da.dims else da.sel(plev=level, method="nearest")
+
+        if multilevel:
+            level_dim = "level" if "level" in da.dims else ("plev" if "plev" in da.dims else None)
+            if level_dim:
+                if level is not None:
+                    da = da.sel({level_dim: level}, method="nearest")
+                else:
+                    da = da.isel({level_dim: 0})
+
+        da = da.squeeze(drop=True)
+        for dim in list(da.dims):
+            if dim not in ("lat", "lon"):
+                da = da.isel({dim: 0})
+        da = da.squeeze(drop=True)
+
+        if "lat" not in da.dims or "lon" not in da.dims:
+            raise ValueError(f"Slice data must contain lat/lon dims. Got dims: {tuple(da.dims)}")
+
         lats = da["lat"].values.tolist()
         lons = da["lon"].values.tolist()
         
-        # Convert values to list, ensuring NaN becomes null and arrays stay as arrays
-        raw_values = da.values
+        # Convert values to 2D list, replacing non-finite values with None
+        raw_values = np.asarray(da.values)
+        if raw_values.ndim == 0:
+            raw_values = raw_values.reshape(1, 1)
+        elif raw_values.ndim == 1:
+            raw_values = raw_values.reshape(raw_values.shape[0], 1)
+        elif raw_values.ndim > 2:
+            while raw_values.ndim > 2:
+                raw_values = raw_values[0]
+
         values = []
-        for row in raw_values:
-            if isinstance(row, np.ndarray):
-                # Convert each row, replacing NaN with None (becomes null in JSON)
-                converted_row = [float(v) if np.isfinite(v) else None for v in row]
-                values.append(converted_row)
-            else:
-                # Fallback for non-array rows
-                values.append([float(row) if np.isfinite(row) else None])
-        
-        # Calculate min/max only from finite values
-        flat_values = raw_values.flatten()
-        finite_values = flat_values[np.isfinite(flat_values)]
-        if len(finite_values) > 0:
-            min_val = float(np.min(finite_values))
-            max_val = float(np.max(finite_values))
+        finite_values = []
+        for row in raw_values.tolist():
+            converted_row = []
+            for value in row:
+                try:
+                    scalar = float(value)
+                    if np.isfinite(scalar):
+                        converted_row.append(scalar)
+                        finite_values.append(scalar)
+                    else:
+                        converted_row.append(None)
+                except (TypeError, ValueError):
+                    converted_row.append(None)
+            values.append(converted_row)
+
+        if finite_values:
+            min_val = float(min(finite_values))
+            max_val = float(max(finite_values))
         else:
             min_val = 0.0
             max_val = 1.0
-            
+        
+        print(f"[SLICE] center={center}, atlantic={center == 'atlantic'}, pacific={center == 'pacific'}")
+        
         if center == "pacific":
-            lons = [(lon + 360) % 360 if lon < 0 else lon for lon in lons]
-            values = [row[::-1] for row in values]
-            lons = lons[::-1]
+            # For Pacific centering, we need to find the dateline (0 degrees) and roll data there
+            # Find index where longitude crosses from negative to positive (or wraps around)
+            lons_array = np.array(lons)
+            
+            # Find the "seam" - the index where we should split
+            # Look for the largest gap between consecutive longitudes
+            lon_diffs = np.diff(np.concatenate([[lons_array[-1] - 360], lons_array]))
+            seam_idx = np.argmax(lon_diffs)
+            
+            print(f"[PACIFIC] lons range: [{lons_array[0]}, ..., {lons_array[-1]}]")
+            print(f"[PACIFIC] seam_idx: {seam_idx}, lon_diffs max: {lon_diffs[seam_idx]}")
+            
+            # Roll the data and longitudes
+            values_array = np.array(values)
+            rolled_values = np.roll(values_array, -seam_idx, axis=1)
+            rolled_lons = np.roll(lons_array, -seam_idx)
+            
+            # Convert rolled lons to 0-360 range for Pacific view
+            rolled_lons = np.where(rolled_lons < 0, rolled_lons + 360, rolled_lons)
+            
+            print(f"[PACIFIC] rolled lons range: [{rolled_lons[0]}, ..., {rolled_lons[-1]}]")
+            
+            lons = rolled_lons.tolist()
+            values = rolled_values.tolist()
+        
         return {
             "var": chosen_var,
             "date_selected": date,
@@ -939,39 +1446,82 @@ async def get_plot_timeseries(
     lon: float = Query(..., description="Longitude", ge=-180, le=180),
     variable: Optional[str] = Query(None, description="Variable of interest (optional)"),
     level: Optional[float] = Query(None, description="Level for multilevel datasets (optional)"),
-    downsample: int = Query(0, description="Downsample: 0=none, 1=skip every point, 2=every 2nd, etc")
+    downsample: int = Query(0, description="Downsample: 0=none, 1=skip every point, 2=every 2nd, etc"),
+    all_levels: bool = Query(False, description="Extract all (or requested) levels in one pass for multilevel datasets"),
+    levels: Optional[str] = Query(None, description="Comma-separated levels; used with all_levels=true"),
+    start_date: Optional[str] = Query(None, description="Optional start date (YYYY-MM-DD) for early time slicing"),
+    end_date: Optional[str] = Query(None, description="Optional end date (YYYY-MM-DD) for early time slicing"),
+    smooth_window: int = Query(1, description="Optional centered rolling window for smoothing (>=1)"),
+    resample_rule: Optional[str] = Query(None, description="Optional pandas resample rule (e.g., M, Y)"),
+    normalize: bool = Query(False, description="If true, z-score normalize extracted 1D series"),
+    detrend: bool = Query(False, description="If true, remove linear trend from extracted 1D series"),
 ):
     """Get timeseries data for a specific lat/lon (and level)."""
     full_path = sanitize_path(path)
     
-    # Create cache key
-    cache_key = f"{path}||{variable or ''}||{lat}||{lon}||{level or 'none'}||{downsample}"
+    cache_key = (
+        _normalize_timeseries_cache_key(path, variable, lat, lon, level, downsample)
+        + f"||all={int(all_levels)}||levels={levels or ''}||start={start_date or ''}||end={end_date or ''}"
+        + f"||smooth={int(smooth_window)}||resample={resample_rule or ''}||norm={int(normalize)}||detrend={int(detrend)}"
+    )
     
-    # Check cache first
-    if cache_key in TIMESERIES_PLOT_CACHE:
-        return TIMESERIES_PLOT_CACHE[cache_key]
+    cached = _get_cached_timeseries(cache_key)
+    if cached is not None:
+        return cached
     
     # Prevent duplicate concurrent requests
     if cache_key not in REQUEST_LOCKS:
         REQUEST_LOCKS[cache_key] = asyncio.Lock()
     
     async with REQUEST_LOCKS[cache_key]:
-        # Double-check cache after acquiring lock
-        if cache_key in TIMESERIES_PLOT_CACHE:
-            return TIMESERIES_PLOT_CACHE[cache_key]
+        cached = _get_cached_timeseries(cache_key)
+        if cached is not None:
+            return cached
         
         try:
             ds, chosen_var, _, _, _, _ = open_dataset_flexible(full_path, variable)
             da = ds[chosen_var]
-            data = plot_point_timeseries(da, lat, lon, level, downsample)
-            
-            TIMESERIES_PLOT_CACHE[cache_key] = data
+            requested_levels = _parse_levels_csv(levels)
+            if all_levels and is_multilevel(da):
+                data = plot_point_timeseries_multilevel(
+                    da,
+                    lat=lat,
+                    lon=lon,
+                    levels=requested_levels,
+                    downsample=downsample,
+                    start_date=start_date,
+                    end_date=end_date,
+                    smooth_window=max(1, int(smooth_window)),
+                    resample_rule=resample_rule,
+                    normalize=normalize,
+                    detrend=detrend,
+                )
+            else:
+                if requested_levels and level is None:
+                    level = requested_levels[0]
+                data = plot_point_timeseries(
+                    da,
+                    lat=lat,
+                    lon=lon,
+                    level=level,
+                    downsample=downsample,
+                    start_date=start_date,
+                    end_date=end_date,
+                    smooth_window=max(1, int(smooth_window)),
+                    resample_rule=resample_rule,
+                    normalize=normalize,
+                    detrend=detrend,
+                )
+
+            _set_cached_timeseries(cache_key, data)
             return data
         except Exception as e:
             import traceback
             print(f"Error in plot_timeseries: {str(e)}")
             traceback.print_exc()
             return JSONResponse(status_code=500, content={"error": f"Failed to generate timeseries plot: {str(e)}"})
+        finally:
+            REQUEST_LOCKS.pop(cache_key, None)
 
 @app.get("/plot_histogram")
 async def get_plot_histogram(

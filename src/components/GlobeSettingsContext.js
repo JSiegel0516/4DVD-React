@@ -3,7 +3,7 @@ import React, { createContext, useContext, useState, useMemo, useCallback, useEf
 const GlobeSettingsContext = createContext();
 
 export function GlobeSettingsProvider({ children }) {
-  const [graphicalSettings, setGraphicalSettings] = useState({
+  const defaultGraphicalSettings = {
     latLonLines: true,
     pacificCentered: false,
     globeView: '3D Orthographic',
@@ -12,7 +12,11 @@ export function GlobeSettingsProvider({ children }) {
     coasts: 'Medium',
     bumpMapping: 'None',
     countries: 'Off',
-  });
+    smoothedGridboxes: false,
+    geographicalLines: false,
+    timezones: false,
+  };
+  const [graphicalSettings, setGraphicalSettings] = useState(defaultGraphicalSettings);
   const [selectedDataset, setSelectedDataset] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedLevel, setSelectedLevel] = useState(null);
@@ -22,7 +26,9 @@ export function GlobeSettingsProvider({ children }) {
     colormap: 'Matlab|Jet', 
     multilevel: false, 
     levels: null, 
-    level_units: '' // Initialize level_units
+    level_units: '', // Initialize level_units
+    dataset_path: null,
+    metadata_loading: false,
   });
   const [availableDates, setAvailableDates] = useState([]);
   const [colorMapOpen, setColorMapOpen] = useState(false);
@@ -63,8 +69,13 @@ export function GlobeSettingsProvider({ children }) {
     }
 
     prevDatasetRef.current = selectedDataset.relative_path;
+    setMetadata((prev) => ({
+      ...prev,
+      dataset_path: selectedDataset.relative_path,
+      metadata_loading: true,
+    }));
     console.log('Fetching metadata for', selectedDataset.relative_path);
-    fetch(`http://localhost:8080/dataset_info?path=${encodeURIComponent(selectedDataset.relative_path)}`)
+    fetch(`/dataset_info?path=${encodeURIComponent(selectedDataset.relative_path)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to fetch metadata: ${res.status} ${res.statusText}`);
         return res.json();
@@ -79,6 +90,8 @@ export function GlobeSettingsProvider({ children }) {
           multilevel: data.multilevel || false,
           levels: data.levels || null,
           level_units: (data.level_units || null),
+          dataset_path: selectedDataset.relative_path,
+          metadata_loading: false,
         });
         if (data.multilevel && data.levels && data.levels.length > 0 && !selectedLevel) {
           setSelectedLevel(data.levels[0]);
@@ -96,12 +109,14 @@ export function GlobeSettingsProvider({ children }) {
           multilevel: false,
           levels: null,
           level_units: 'level',
+          dataset_path: selectedDataset.relative_path,
+          metadata_loading: false,
         });
         setSelectedLevel(null);
       });
 
     console.log('Fetching dates for', selectedDataset.relative_path);
-    fetch(`http://localhost:8080/dataset_dates?path=${encodeURIComponent(selectedDataset.relative_path)}`)
+    fetch(`/dataset_dates?path=${encodeURIComponent(selectedDataset.relative_path)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to fetch dates: ${res.status} ${res.statusText}`);
         return res.json();
@@ -123,11 +138,7 @@ export function GlobeSettingsProvider({ children }) {
         setAvailableDates([]);
         setSelectedDate(null);
       });
-
-    return () => {
-      prevDatasetRef.current = null;
-    };
-  }, [selectedDataset, selectedLevel]);
+  }, [selectedDataset]);
 
   // Memoize the context value
   const value = useMemo(

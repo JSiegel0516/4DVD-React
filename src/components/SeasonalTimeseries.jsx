@@ -115,7 +115,7 @@ const SeasonalTimeseries = ({
 
       // Fetch full timeseries data
       const response = await fetch(
-        `http://localhost:8080/plot_timeseries?path=${encodeURIComponent(datasetPath)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
+        `/plot_timeseries?path=${encodeURIComponent(datasetPath)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
       );
 
       if (!response.ok) {

@@ -80,7 +80,7 @@ function HistogramDialog({ open, onClose, varName, units, datasetName }) {
         const normalizedPath = selectedDataset.relative_path.replace(/\\/g, '/');
         console.log("Fetching histogram for path:", normalizedPath);
         const response = await fetch(
-          `http://localhost:8080/month_histogram?path=${encodeURIComponent(normalizedPath)}&variable=${varName}&year=${year}&month=${month}&bins=30${levelParam}`
+          `/month_histogram?path=${encodeURIComponent(normalizedPath)}&variable=${varName}&year=${year}&month=${month}&bins=30${levelParam}`
         );
         if (!response.ok) {
           const errorText = await response.text();
