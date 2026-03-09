@@ -1173,11 +1173,13 @@ def get_cached_datasets(force_refresh: bool = False) -> List[Dict[str, str]]:
     DATASETS_LIST_CACHE_TS = now
     return datasets
 
+@app.get("/api/datasets", response_model=List[Dict[str, str]])
 @app.get("/datasets", response_model=List[Dict[str, str]])
 async def get_datasets(refresh: bool = Query(False, description="Force refresh dataset scan, bypassing cache")):
     """List available datasets (zarr only) with paths and metadata."""
     return get_cached_datasets(force_refresh=refresh)
 
+@app.get("/api/dataset_info")
 @app.get("/dataset_info")
 async def get_dataset_info(
     path: str = Query(..., description="Relative path to the zarr store from dataset root"),
@@ -1223,6 +1225,9 @@ async def get_dataset_info(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to read dataset info: {str(e)}"})
 
+@app.get("/api/clear_caches")
+@app.get("/clear_caches")
+@app.post("/api/clear_caches")
 @app.post("/clear_caches")
 async def clear_caches():
     global DATASETS_LIST_CACHE, DATASETS_LIST_CACHE_TS
@@ -1237,6 +1242,7 @@ async def clear_caches():
     DATASETS_LIST_CACHE_TS = 0.0
     return {"status": "all caches cleared"}
 
+@app.get("/api/dataset_dates")
 @app.get("/dataset_dates")
 async def get_dataset_dates(
     path: str = Query(..., description="Relative path to the zarr store from dataset root")
@@ -1394,6 +1400,7 @@ async def get_slice(
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": f"Failed to fetch slice: {str(e)}"})
 
+@app.get("/api/statistics")
 @app.get("/statistics")
 async def get_statistics(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1412,6 +1419,7 @@ async def get_statistics(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to compute statistics: {str(e)}"})
 
+@app.get("/api/point_statistics")
 @app.get("/point_statistics")
 async def get_point_statistics(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1439,6 +1447,7 @@ async def get_point_statistics(
         print(f"Error in point_statistics: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to compute point statistics: {str(e)}")
 
+@app.get("/api/plot_timeseries")
 @app.get("/plot_timeseries")
 async def get_plot_timeseries(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1523,6 +1532,7 @@ async def get_plot_timeseries(
         finally:
             REQUEST_LOCKS.pop(cache_key, None)
 
+@app.get("/api/plot_histogram")
 @app.get("/plot_histogram")
 async def get_plot_histogram(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1541,6 +1551,7 @@ async def get_plot_histogram(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to generate histogram: {str(e)}"})
 
+@app.get("/api/month_histogram")
 @app.get("/month_histogram")
 async def get_month_histogram(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1561,6 +1572,7 @@ async def get_month_histogram(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to generate histogram: {str(e)}"})
 
+@app.get("/api/plot_histogram_month")
 @app.get("/plot_histogram_month")
 async def get_plot_histogram_month(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1581,6 +1593,7 @@ async def get_plot_histogram_month(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to generate histogram: {str(e)}"})
 
+@app.get("/api/plot_month_histogram_across_years")
 @app.get("/plot_month_histogram_across_years")
 async def get_plot_month_histogram_across_years(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1602,6 +1615,7 @@ async def get_plot_month_histogram_across_years(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to generate histogram: {str(e)}"})
 
+@app.get("/api/monthly_mean_std")
 @app.get("/monthly_mean_std")
 async def get_monthly_mean_std(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1623,6 +1637,7 @@ async def get_monthly_mean_std(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to compute statistics: {str(e)}"})
 
+@app.get("/api/monthly_mean_yearly_std")
 @app.get("/monthly_mean_yearly_std")
 async def get_monthly_mean_yearly_std(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1644,6 +1659,7 @@ async def get_monthly_mean_yearly_std(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to compute statistics: {str(e)}"})
 
+@app.get("/api/seasonal_timeseries")
 @app.get("/seasonal_timeseries")
 async def get_seasonal_timeseries(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1667,6 +1683,7 @@ async def get_seasonal_timeseries(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to compute seasonal time series: {str(e)}"})
 
+@app.get("/api/plot_seasonal_timeseries")
 @app.get("/plot_seasonal_timeseries")
 async def get_plot_seasonal_timeseries(
     path: str = Query(..., description="Relative path to the zarr store"),
@@ -1689,6 +1706,7 @@ async def get_plot_seasonal_timeseries(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Failed to generate seasonal timeseries plot: {str(e)}"})
 
+@app.get("/api/plot_monthly_climatology")
 @app.get("/plot_monthly_climatology")
 async def get_plot_monthly_climatology(
     path: str = Query(..., description="Relative path to the zarr store"),
