@@ -1,14 +1,15 @@
 import os
+import time
 from typing import Dict, Optional, Union
 
 import pandas as pd
 import importlib
 import xarray as xr
 from urllib.parse import urlparse
-from ftplib import FTP
+from ftplib import FTP, error_perm, all_errors
 from tqdm import tqdm  # pip install tqdm
 
-CSV_FILE = "ftp_check_results.csv"
+CSV_FILE = "Datasets.csv"
 DOWNLOAD_DIR = "dataset"
 
 
@@ -17,9 +18,10 @@ def safe_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._- ()" else "_" for c in name)
 
 
-def ftp_download(url: str, dest_path: str) -> str:
+def ftp_download(url: str, dest_path: str, *, max_retries: int = 3, retry_delay_seconds: int = 3) -> str:
     """Download a file from FTP with progress bar."""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    url = str(url).strip()
     parsed = urlparse(url)
 
     if parsed.scheme != "ftp":
@@ -27,43 +29,95 @@ def ftp_download(url: str, dest_path: str) -> str:
         return ""
 
     host = parsed.hostname
-    filepath = parsed.path
+    filepath = (parsed.path or "").strip()
+    if not filepath.startswith("/"):
+        filepath = "/" + filepath
 
-    try:
-        with FTP(host) as ftp:
-            ftp.login()  # anonymous login
+    if not host or not filepath or filepath == "/":
+        print(f"❌ Invalid FTP URL path: {url}")
+        return ""
 
-            # Try to get file size for progress bar
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        pbar = None
+        try:
+            with FTP(host) as ftp:
+                ftp.login()  # anonymous login
+
+                # Try to get file size for progress bar and early missing-file signal.
+                try:
+                    total_size = ftp.size(filepath)
+                except error_perm as pe:
+                    if "550" in str(pe):
+                        print(f"❌ Remote file missing/unavailable (550): {url}")
+                        return ""
+                    total_size = None
+                except Exception:
+                    total_size = None
+
+                print(f"⬇️ Downloading {url} -> {dest_path} (attempt {attempt}/{max_retries})")
+
+                with open(dest_path, "wb") as f:
+                    pbar = tqdm(
+                        total=total_size,
+                        unit="B",
+                        unit_scale=True,
+                        unit_divisor=1024,
+                        desc=os.path.basename(dest_path),
+                        leave=True,
+                    )
+
+                    def callback(chunk):
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+
+                    ftp.retrbinary(f"RETR {filepath}", callback)
+
+            # Validate that we downloaded a non-empty file.
             try:
-                total_size = ftp.size(filepath)
-            except Exception:
-                total_size = None
+                size = os.path.getsize(dest_path)
+            except OSError:
+                size = 0
+            if size <= 0:
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+                print(f"❌ Downloaded empty file, skipping: {dest_path}")
+                return ""
 
-            print(f"⬇️ Downloading {url} -> {dest_path}")
+            print(f"✅ Saved: {dest_path}")
+            return dest_path
 
-            with open(dest_path, "wb") as f:
-                pbar = tqdm(
-                    total=total_size,
-                    unit="B",
-                    unit_scale=True,
-                    unit_divisor=1024,
-                    desc=os.path.basename(dest_path),
-                    leave=True,
-                )
+        except error_perm as e:
+            last_error = e
+            if "550" in str(e):
+                print(f"❌ Remote file missing/unavailable (550): {url}")
+                return ""
+            # Other permanent FTP errors are unlikely to succeed on retry.
+            print(f"❌ Failed to download {url}: {e}")
+            return ""
+        except all_errors as e:
+            last_error = e
+            # Remove partially written files so retries start cleanly.
+            try:
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+            except OSError:
+                pass
 
-                def callback(chunk):
-                    f.write(chunk)
-                    pbar.update(len(chunk))
+            if attempt >= max_retries:
+                break
 
-                ftp.retrbinary(f"RETR {filepath}", callback)
+            sleep_seconds = retry_delay_seconds * (2 ** (attempt - 1))
+            print(f"⚠️ FTP transfer failed ({e}). Retrying in {sleep_seconds}s...")
+            time.sleep(sleep_seconds)
+        finally:
+            if pbar is not None:
                 pbar.close()
 
-        print(f"✅ Saved: {dest_path}")
-        return dest_path
-
-    except Exception as e:
-        print(f"❌ Failed to download {url}: {e}")
-        return ""
+    print(f"❌ Failed to download {url} after {max_retries} attempts: {last_error}")
+    return ""
 
 
 def convert_nc_to_zarr(
@@ -111,6 +165,10 @@ def convert_nc_to_zarr(
 
     os.makedirs(os.path.dirname(zarr_path) or ".", exist_ok=True)
 
+    # Fast fail for empty/corrupt downloads before xarray/netCDF parsing.
+    if os.path.getsize(nc_path) <= 0:
+        raise ValueError(f"Input .nc file is empty: {nc_path}")
+
     print(f"🧪 Converting to Zarr: {nc_path} -> {zarr_path}")
     try:
         try:
@@ -120,9 +178,31 @@ def convert_nc_to_zarr(
                 "Required dependency 'zarr' is not installed. Install it via 'pip install zarr'."
             ) from ie
 
-        ds = xr.open_dataset(nc_path, engine="netcdf4", chunks=chunks)
-        # Write to Zarr
-        ds.to_zarr(zarr_path, mode="w")
+        # Some datasets have non-standard time metadata; fall back to
+        # decode_times=False when CF decoding fails.
+        open_attempts = [
+            {"decode_times": True, "use_cftime": True},
+            {"decode_times": False},
+        ]
+
+        ds = None
+        open_error = None
+        for open_kwargs in open_attempts:
+            try:
+                ds = xr.open_dataset(nc_path, engine="netcdf4", chunks=chunks, **open_kwargs)
+                break
+            except Exception as e:
+                open_error = e
+
+        if ds is None:
+            raise RuntimeError(f"Unable to open NetCDF dataset: {open_error}")
+
+        try:
+            # Write to Zarr
+            ds.to_zarr(zarr_path, mode="w")
+        finally:
+            ds.close()
+
         # Optionally consolidate metadata for faster multi-file opening
         if consolidate_metadata:
             try:

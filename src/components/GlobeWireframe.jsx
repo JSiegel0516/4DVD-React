@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState, useCallback, memo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo, memo } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { createGraticuleLines } from '../gl/GraticuleLines';
 import { loadCoasts } from '../gl/loadCoasts';
 import { loadRiversAndLakes } from '../gl/loadRiversAndLakes';
 import { loadCountryOutlines } from '../gl/loadCountryOutlines';
+import { loadTimeZones } from '../gl/loadTimeZones';
 import { loadBumpMap } from '../gl/LandBump';
 import { useGlobeSettings } from './GlobeSettingsContext';
 import { Box, Typography, Button, Select, MenuItem, FormControl, InputLabel } from '@mui/material';
@@ -20,6 +21,7 @@ const GlobeWireframe = () => {
   const coastsRef = useRef();
   const riversLakesRef = useRef();
   const countriesRef = useRef(new THREE.Group());
+  const timeZonesRef = useRef(new THREE.Group());
   const controlsRef = useRef();
   const cameraRef = useRef();
   const camera3DRef = useRef(); // Separate ref for 3D camera
@@ -39,11 +41,173 @@ const GlobeWireframe = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [openTimeSeries, setOpenTimeSeries] = useState(false);
   const [colorMapManager, setColorMapManager] = useState(null);
-  const [colorbar, setColorbar] = useState({ gradient: '', min: 0, max: 1 });
+  const [colorbar, setColorbar] = useState({ gradient: '', min: 0, max: 1, labels: [] });
+  const [temperatureUnit, setTemperatureUnit] = useState('celsius');
+  const [showRangeRail, setShowRangeRail] = useState(false);
+  const [rangeSelectionPct, setRangeSelectionPct] = useState({ min: 0, max: 100 });
+  const [dragHandle, setDragHandle] = useState(null);
+  const rangeRailRef = useRef(null);
   const fetchIdRef = useRef(0);
   const fetchAbortRef = useRef(null);
   const bumpFetchIdRef = useRef(0);
   const { graphicalSettings, selectedDataset, selectedDate, selectedLevel, metadata, setSelectedLevel, setColormap, colorMapOpen, setColorMapOpen } = useGlobeSettings();
+
+  const unitInfo = useMemo(() => {
+    const rawCandidates = [metadata?.units, gridData?.units].filter(
+      (value) => typeof value === 'string' && value.trim() !== ''
+    );
+
+    let symbol = '';
+    for (const raw of rawCandidates) {
+      const normalized = raw.trim();
+      const lower = normalized.toLowerCase();
+      const alphaOnly = lower.replace(/[^a-z]/g, '');
+
+      if (
+        normalized.includes('℃') ||
+        lower.includes('celsius') ||
+        lower.includes('°c') ||
+        lower.includes('degc') ||
+        alphaOnly === 'c'
+      ) {
+        symbol = '°C';
+        break;
+      }
+      if (
+        normalized.includes('℉') ||
+        lower.includes('fahrenheit') ||
+        lower.includes('°f') ||
+        lower.includes('degf') ||
+        alphaOnly === 'f'
+      ) {
+        symbol = '°F';
+        break;
+      }
+      if (
+        normalized.includes('K') ||
+        lower.includes('kelvin') ||
+        lower.includes('°k') ||
+        lower.includes('degk') ||
+        alphaOnly === 'k'
+      ) {
+        symbol = 'K';
+        break;
+      }
+      if (!symbol) symbol = normalized;
+    }
+
+    const textHints = [
+      selectedDataset?.name,
+      selectedDataset?.description,
+      selectedDataset?.relative_path,
+      metadata?.title,
+    ]
+      .filter((v) => typeof v === 'string' && v.trim())
+      .join(' ')
+      .toLowerCase();
+
+    const hasTemperatureHints =
+      textHints.includes('temp') || textHints.includes('sea surface') || textHints.includes('sst');
+
+    return {
+      symbol,
+      allowToggle: symbol === '°C' && hasTemperatureHints,
+    };
+  }, [metadata?.units, metadata?.title, gridData?.units, selectedDataset]);
+
+  const toDisplayValue = useCallback(
+    (value) => {
+      if (!unitInfo.allowToggle || temperatureUnit !== 'fahrenheit') return value;
+      return (value * 9) / 5 + 32;
+    },
+    [unitInfo.allowToggle, temperatureUnit]
+  );
+
+  const formatTick = useCallback((value) => {
+    if (!Number.isFinite(value)) return '–';
+    if (value === 0) return '0';
+    const abs = Math.abs(value);
+    if (abs < 1e-4) return value.toExponential(2);
+    if (abs < 1) return Number(value.toPrecision(3)).toString();
+    if (abs < 10) return value.toFixed(2);
+    if (abs < 100) return value.toFixed(1);
+    if (abs < 1000) return value.toFixed(0);
+    return `${(value / 1000).toFixed(1)}k`;
+  }, []);
+
+  const displayColorbar = useMemo(() => {
+    const displayMin = toDisplayValue(colorbar.min);
+    const displayMax = toDisplayValue(colorbar.max);
+    const values = Array.isArray(colorbar.labels) && colorbar.labels.length > 0
+      ? colorbar.labels.map((v) => toDisplayValue(v))
+      : [displayMin, displayMax];
+    const labels = values.map((v) => formatTick(v));
+    const currentUnitSymbol = unitInfo.allowToggle
+      ? temperatureUnit === 'fahrenheit'
+        ? '°F'
+        : '°C'
+      : unitInfo.symbol || '';
+
+    return {
+      min: displayMin,
+      max: displayMax,
+      labels,
+      unitSymbol: currentUnitSymbol,
+    };
+  }, [colorbar.min, colorbar.max, colorbar.labels, toDisplayValue, formatTick, unitInfo, temperatureUnit]);
+
+  useEffect(() => {
+    setTemperatureUnit('celsius');
+    setShowRangeRail(false);
+    setRangeSelectionPct({ min: 0, max: 100 });
+    setDragHandle(null);
+  }, [selectedDataset?.relative_path]);
+
+  const selectedRangeValues = useMemo(() => {
+    const total = displayColorbar.max - displayColorbar.min;
+    const min = displayColorbar.min + (total * rangeSelectionPct.min) / 100;
+    const max = displayColorbar.min + (total * rangeSelectionPct.max) / 100;
+    return { min, max };
+  }, [displayColorbar.min, displayColorbar.max, rangeSelectionPct]);
+
+  useEffect(() => {
+    if (!dragHandle) return;
+
+    const onMove = (clientY) => {
+      const rail = rangeRailRef.current;
+      if (!rail) return;
+      const rect = rail.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (rect.bottom - clientY) / rect.height));
+      const pct = ratio * 100;
+
+      setRangeSelectionPct((prev) => {
+        if (dragHandle === 'min') {
+          return { ...prev, min: Math.min(pct, prev.max) };
+        }
+        return { ...prev, max: Math.max(pct, prev.min) };
+      });
+    };
+
+    const onMouseMove = (e) => onMove(e.clientY);
+    const onTouchMove = (e) => {
+      if (e.touches && e.touches.length > 0) {
+        onMove(e.touches[0].clientY);
+      }
+    };
+    const onUp = () => setDragHandle(null);
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onUp);
+    document.addEventListener('touchmove', onTouchMove, { passive: true });
+    document.addEventListener('touchend', onUp);
+
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('touchmove', onTouchMove);
+      document.removeEventListener('touchend', onUp);
+    };
+  }, [dragHandle]);
 
   const getFallbackUnits = (varName) => {
     if (!varName) return 'unknown';
@@ -279,6 +443,35 @@ const GlobeWireframe = () => {
         return;
       }
       const colors = colorMapManager.generateRGBAStrings(colormap, 256);
+
+      const datasetText = [
+        selectedDataset?.name,
+        selectedDataset?.description,
+        selectedDataset?.relative_path,
+      ]
+        .filter((v) => typeof v === 'string')
+        .join(' ')
+        .toLowerCase();
+      const isGodas =
+        datasetText.includes('godas') ||
+        datasetText.includes('global ocean data assimilation system') ||
+        datasetText.includes('ncep global ocean data assimilation');
+
+      if (isGodas) {
+        computedMin = -0.0000005;
+        computedMax = 0.0000005;
+      }
+      if (!isFinite(computedMin) || !isFinite(computedMax) || computedMax <= computedMin) {
+        computedMin = 0;
+        computedMax = 1;
+      }
+
+      const selectedMinRaw = computedMin + ((computedMax - computedMin) * rangeSelectionPct.min) / 100;
+      const selectedMaxRaw = computedMin + ((computedMax - computedMin) * rangeSelectionPct.max) / 100;
+      const activeMin = Math.min(selectedMinRaw, selectedMaxRaw);
+      const activeMax = Math.max(selectedMinRaw, selectedMaxRaw);
+      const activeSpan = Math.max(activeMax - activeMin, 1e-12);
+
       console.log('Colormap colors generated:', { colormap, colorCount: colors.length, firstColor: colors[0], lastColor: colors[255] });
       // Build a CSS gradient string for the colorbar (top -> bottom)
       const stops = colors.filter((_, idx) => idx % 8 === 0 || idx === colors.length - 1)
@@ -287,7 +480,12 @@ const GlobeWireframe = () => {
           return `${c} ${pct}%`;
         });
       const gradientCss = `linear-gradient(180deg, ${stops.join(', ')})`;
-      setColorbar({ gradient: gradientCss, min: computedMin, max: computedMax });
+      const tickCount = isGodas ? 2 : 7;
+      const labels = Array.from({ length: tickCount }, (_, i) => {
+        if (tickCount <= 1) return computedMin;
+        return computedMin + ((computedMax - computedMin) * i) / (tickCount - 1);
+      });
+      setColorbar({ gradient: gradientCss, min: computedMin, max: computedMax, labels });
       let invalidCount = 0;
 
       for (let i = 0; i < lats.length; i++) {
@@ -306,9 +504,9 @@ const GlobeWireframe = () => {
             ctx.fillStyle = 'rgba(0,0,0,1)';  // Black for N/A values
             invalidCount++;
           } else {
-            const normalized = Math.max(0, Math.min(1, (value - computedMin) / (computedMax - computedMin)));
+            const normalized = Math.max(0, Math.min(1, (value - activeMin) / activeSpan));
             if (!isFinite(normalized)) {
-              console.warn('Invalid normalized value:', { value, computedMin, computedMax, i, j });
+              console.warn('Invalid normalized value:', { value, activeMin, activeMax, i, j });
               ctx.fillStyle = 'rgba(0,0,0,1)';  // Black for invalid values
               invalidCount++;
             } else {
@@ -338,11 +536,13 @@ const GlobeWireframe = () => {
       }
 
       const newTexture = new THREE.CanvasTexture(canvas);
-      newTexture.minFilter = THREE.LinearFilter;
-      newTexture.magFilter = THREE.LinearFilter;
+      const filterMode = graphicalSettings.smoothedGridboxes ? THREE.LinearFilter : THREE.NearestFilter;
+      newTexture.minFilter = filterMode;
+      newTexture.magFilter = filterMode;
       newTexture.wrapS = THREE.RepeatWrapping;
       newTexture.wrapT = THREE.ClampToEdgeWrapping;
       newTexture.flipY = false;
+      newTexture.generateMipmaps = graphicalSettings.smoothedGridboxes;
       const offsetX = computeTextureOffsetX(lons, graphicalSettings.pacificCentered);
       setTextureOffsetX(offsetX);
       newTexture.offset = new THREE.Vector2(offsetX, 0);
@@ -351,7 +551,7 @@ const GlobeWireframe = () => {
       console.error('Error generating texture:', err);
       setTexture(null);
     }
-  }, [gridData, graphicalSettings.pacificCentered, metadata.colormap, colorMapManager, computeTextureOffsetX]);
+  }, [gridData, graphicalSettings.pacificCentered, graphicalSettings.smoothedGridboxes, metadata.colormap, colorMapManager, computeTextureOffsetX, selectedDataset, rangeSelectionPct]);
 
   // Ensure material updates when textures change
   useEffect(() => {
@@ -363,6 +563,10 @@ const GlobeWireframe = () => {
       flatTexture.repeat.set(1, 1);
       flatTexture.wrapS = THREE.RepeatWrapping;
       flatTexture.wrapT = THREE.ClampToEdgeWrapping;
+      const filterMode = graphicalSettings.smoothedGridboxes ? THREE.LinearFilter : THREE.NearestFilter;
+      flatTexture.minFilter = filterMode;
+      flatTexture.magFilter = filterMode;
+      flatTexture.generateMipmaps = graphicalSettings.smoothedGridboxes;
       flatTexture.needsUpdate = true;
       
       planeRef.current.material.map = flatTexture;
@@ -389,7 +593,7 @@ const GlobeWireframe = () => {
         planeRef.current.material.needsUpdate = true;
       }
     }
-  }, [texture, bumpTexture, is2DMode, textureOffsetX]);
+  }, [texture, bumpTexture, is2DMode, textureOffsetX, graphicalSettings.smoothedGridboxes]);
 
   // Handle globe click with rotation correction
   const handleClick = useCallback((event) => {
@@ -642,6 +846,15 @@ const GlobeWireframe = () => {
       scene.add(countries);
     });
 
+    const timeZonesPromise = graphicalSettings.timezones
+      ? loadTimeZones(graphicalSettings.pacificCentered, false)
+      : Promise.resolve(new THREE.Group());
+    timeZonesPromise.then((timeZones) => {
+      console.log(`Timezones loaded: ${timeZones.children.length} lines`);
+      timeZonesRef.current = timeZones;
+      scene.add(timeZones);
+    });
+
     const animate = () => {
       requestAnimationFrame(animate);
       controls.update();
@@ -715,6 +928,13 @@ const GlobeWireframe = () => {
           if (child.material) child.material.dispose();
         });
       }
+      if (timeZonesRef.current) {
+        scene.remove(timeZonesRef.current);
+        timeZonesRef.current.children.forEach((child) => {
+          child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        });
+      }
     };
   }, []);
 
@@ -723,7 +943,7 @@ const GlobeWireframe = () => {
     if (!cameraRef.current || !controlsRef.current || !sphereRef.current || !sceneRef.current || !graticuleRef.current || !rendererRef.current) return;
 
     const validResolutions = ['Low', 'Medium', 'High', 'None'];
-    const { globeView, pacificCentered, rivers, lakes, coasts, latLonLines, countries } = graphicalSettings;
+    const { globeView, pacificCentered, rivers, lakes, coasts, latLonLines, countries, timezones } = graphicalSettings;
     const aspect = mountRef.current?.clientWidth / mountRef.current?.clientHeight;
 
     if (!aspect) return;
@@ -817,6 +1037,13 @@ const GlobeWireframe = () => {
           if (child.material) child.material.dispose();
         });
       }
+      if (timeZonesRef.current) {
+        sceneRef.current.remove(timeZonesRef.current);
+        timeZonesRef.current.children.forEach((child) => {
+          child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        });
+      }
       
       // Load 2D flat map overlays
       console.log('Loading 2D Mercator overlays...');
@@ -862,6 +1089,19 @@ const GlobeWireframe = () => {
           countriesRef.current = countriesGroup;
           if (sceneRef.current) {
             sceneRef.current.add(countriesGroup);
+          }
+        });
+      }
+
+      if (timezones) {
+        loadTimeZones(pacificCentered, true).then((timeZonesGroup) => {
+          console.log(`2D Timezones loaded: ${timeZonesGroup.children.length} lines`);
+          if (timeZonesRef.current && sceneRef.current) {
+            sceneRef.current.remove(timeZonesRef.current);
+          }
+          timeZonesRef.current = timeZonesGroup;
+          if (sceneRef.current) {
+            sceneRef.current.add(timeZonesGroup);
           }
         });
       }
@@ -938,6 +1178,13 @@ const GlobeWireframe = () => {
             if (child.material) child.material.dispose();
           });
         }
+        if (timeZonesRef.current) {
+          sceneRef.current.remove(timeZonesRef.current);
+          timeZonesRef.current.children.forEach((child) => {
+            child.geometry.dispose();
+            if (child.material) child.material.dispose();
+          });
+        }
         
         // Reload 3D spherical overlays
         console.log('Reloading 3D spherical overlays...');
@@ -975,6 +1222,17 @@ const GlobeWireframe = () => {
             countriesRef.current = countriesGroup;
             if (sceneRef.current) {
               sceneRef.current.add(countriesGroup);
+            }
+          });
+        }
+        if (timezones) {
+          loadTimeZones(pacificCentered, false).then((timeZonesGroup) => {
+            if (timeZonesRef.current && sceneRef.current) {
+              sceneRef.current.remove(timeZonesRef.current);
+            }
+            timeZonesRef.current = timeZonesGroup;
+            if (sceneRef.current) {
+              sceneRef.current.add(timeZonesGroup);
             }
           });
         }
@@ -1016,6 +1274,14 @@ const GlobeWireframe = () => {
       });
       countriesRef.current = null;
     }
+    if (timeZonesRef.current) {
+      sceneRef.current.remove(timeZonesRef.current);
+      timeZonesRef.current.children.forEach((child) => {
+        child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+      timeZonesRef.current = null;
+    }
 
     // Update assets
     console.log(`Updating: coasts=${coasts}, rivers=${rivers}, lakes=${lakes}, countries=${countries || 'Off'}, pacificCentered=${pacificCentered}`);
@@ -1039,11 +1305,17 @@ const GlobeWireframe = () => {
     } else {
       loadPromises.push(Promise.resolve(new THREE.Group()));
     }
+    if (timezones) {
+      loadPromises.push(loadTimeZones(pacificCentered, false));
+    } else {
+      loadPromises.push(Promise.resolve(new THREE.Group()));
+    }
 
-    Promise.all(loadPromises).then(([coastsGroup, riversLakes, countriesGroup]) => {
+    Promise.all(loadPromises).then(([coastsGroup, riversLakes, countriesGroup, timeZonesGroup]) => {
       console.log(`Coasts updated: ${coastsGroup.children.length} lines`);
       console.log(`Rivers and Lakes updated: ${riversLakes.children.length} objects`);
       console.log(`Countries updated: ${countriesGroup.children.length} lines`);
+      console.log(`Timezones updated: ${timeZonesGroup.children.length} lines`);
       
       // Remove existing features if they still exist (prevent duplicates)
       if (coastsRef.current && sceneRef.current) {
@@ -1055,15 +1327,20 @@ const GlobeWireframe = () => {
       if (countriesRef.current && sceneRef.current) {
         sceneRef.current.remove(countriesRef.current);
       }
+      if (timeZonesRef.current && sceneRef.current) {
+        sceneRef.current.remove(timeZonesRef.current);
+      }
       
       coastsRef.current = coastsGroup;
       riversLakesRef.current = riversLakes;
       countriesRef.current = countriesGroup;
+      timeZonesRef.current = timeZonesGroup;
       
       if (sceneRef.current) {
         sceneRef.current.add(coastsGroup);
         sceneRef.current.add(riversLakes);
         sceneRef.current.add(countriesGroup);
+        sceneRef.current.add(timeZonesGroup);
       }
 
       if (texture) {
@@ -1144,6 +1421,7 @@ const GlobeWireframe = () => {
     graphicalSettings.coasts,
     graphicalSettings.latLonLines,
     graphicalSettings.countries,
+    graphicalSettings.timezones,
     textureOffsetX,
   ]);
 
@@ -1265,29 +1543,165 @@ const GlobeWireframe = () => {
             position: 'absolute',
             right: 16,
             top: 120,
-            width: 28,
-            height: 240,
-            borderRadius: 1,
-            boxShadow: 3,
-            backgroundImage: colorbar.gradient,
-            border: '1px solid rgba(0,0,0,0.2)',
             zIndex: 900,
             display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            paddingY: 1,
-            cursor: 'pointer',
+            alignItems: 'flex-start',
+            gap: 1,
           }}
-          onClick={() => setColorMapOpen(true)}
-          aria-label="Open colormap menu"
         >
-          <Typography variant="caption" sx={{ color: '#000', fontWeight: 600 }}>
-            {Number.isFinite(colorbar.max) ? colorbar.max.toFixed(2) : ''}
-          </Typography>
-          <Typography variant="caption" sx={{ color: '#000', fontWeight: 600 }}>
-            {Number.isFinite(colorbar.min) ? colorbar.min.toFixed(2) : ''}
-          </Typography>
+          <Box
+            sx={{
+              backgroundColor: 'rgba(255,255,255,0.92)',
+              border: '1px solid rgba(0,0,0,0.2)',
+              boxShadow: 3,
+              p: 1,
+            }}
+          >
+            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.75 }}>
+              <Button
+                size="small"
+                variant="text"
+                sx={{ minWidth: 22, px: 0.5, lineHeight: 1, borderRadius: 0 }}
+                onClick={() => setShowRangeRail((prev) => !prev)}
+                title={showRangeRail ? 'Collapse min/max handles' : 'Expand min/max handles'}
+              >
+                {showRangeRail ? '<' : '>'}
+              </Button>
+
+              {unitInfo.allowToggle ? (
+                <Box sx={{ display: 'flex', width: 44, border: '1px solid rgba(0,0,0,0.25)' }}>
+                  <Button
+                    size="small"
+                    variant={temperatureUnit === 'celsius' ? 'contained' : 'text'}
+                    sx={{ minWidth: 22, px: 0, borderRadius: 0 }}
+                    onClick={() => setTemperatureUnit('celsius')}
+                  >
+                    C
+                  </Button>
+                  <Button
+                    size="small"
+                    variant={temperatureUnit === 'fahrenheit' ? 'contained' : 'text'}
+                    sx={{ minWidth: 22, px: 0, borderRadius: 0 }}
+                    onClick={() => setTemperatureUnit('fahrenheit')}
+                  >
+                    F
+                  </Button>
+                </Box>
+              ) : (
+                <Typography variant="caption" sx={{ color: '#111', fontWeight: 600 }}>
+                  {displayColorbar.unitSymbol || ''}
+                </Typography>
+              )}
+
+              <Box sx={{ display: 'flex', alignItems: 'stretch' }}>
+                <Box
+                  sx={{
+                    width: 24,
+                    height: 240,
+                    borderRadius: 0,
+                    boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.2)',
+                    backgroundImage: colorbar.gradient,
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => setColorMapOpen(true)}
+                  aria-label="Open colormap menu"
+                />
+                <Box sx={{ ml: 0.75, height: 240, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  {[...displayColorbar.labels].reverse().map((label, idx) => (
+                    <Typography key={`${label}-${idx}`} variant="caption" sx={{ color: '#111', fontWeight: 600, lineHeight: 1 }}>
+                      {label}
+                    </Typography>
+                  ))}
+                </Box>
+              </Box>
+            </Box>
+          </Box>
+
+          {showRangeRail && (
+            <Box
+              ref={rangeRailRef}
+              sx={{
+                width: 46,
+                height: 240,
+                mt: 7.3,
+                position: 'relative',
+                display: 'flex',
+                justifyContent: 'center',
+              }}
+            >
+              <Box
+                sx={{
+                  position: 'absolute',
+                  top: 0,
+                  bottom: 0,
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  width: 3,
+                  backgroundColor: '#1976d2',
+                }}
+              />
+
+              <Box
+                sx={{
+                  position: 'absolute',
+                  left: '50%',
+                  top: `${100 - rangeSelectionPct.max}%`,
+                  transform: 'translate(-50%, -50%)',
+                  width: 22,
+                  height: 4,
+                  backgroundColor: '#111',
+                  borderRadius: 1,
+                  cursor: 'ns-resize',
+                }}
+                onMouseDown={() => setDragHandle('max')}
+                onTouchStart={() => setDragHandle('max')}
+              />
+
+              <Box
+                sx={{
+                  position: 'absolute',
+                  left: '50%',
+                  top: `${100 - rangeSelectionPct.min}%`,
+                  transform: 'translate(-50%, -50%)',
+                  width: 22,
+                  height: 4,
+                  backgroundColor: '#111',
+                  borderRadius: 1,
+                  cursor: 'ns-resize',
+                }}
+                onMouseDown={() => setDragHandle('min')}
+                onTouchStart={() => setDragHandle('min')}
+              />
+
+              <Typography
+                variant="caption"
+                sx={{
+                  position: 'absolute',
+                  left: 30,
+                  top: `${100 - rangeSelectionPct.max}%`,
+                  transform: 'translateY(-50%)',
+                  color: '#4f5f7d',
+                  fontWeight: 600,
+                }}
+              >
+                {formatTick(selectedRangeValues.max)}
+              </Typography>
+
+              <Typography
+                variant="caption"
+                sx={{
+                  position: 'absolute',
+                  left: 30,
+                  top: `${100 - rangeSelectionPct.min}%`,
+                  transform: 'translateY(-50%)',
+                  color: '#4f5f7d',
+                  fontWeight: 600,
+                }}
+              >
+                {formatTick(selectedRangeValues.min)}
+              </Typography>
+            </Box>
+          )}
         </Box>
       )}
 

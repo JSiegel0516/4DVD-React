@@ -35,7 +35,7 @@ export default function Navbar({ onAboutClick }) {
   const [datasetModalOpen, setDatasetModalOpen] = useState(false);
   const [expandedCategories, setExpandedCategories] = useState({});
   const [expandedLayers, setExpandedLayers] = useState({});
-  const { selectedDataset, setSelectedDataset } = useGlobeSettings();
+  const { selectedDataset, setSelectedDataset, selectedDate, selectedLevel, metadata, graphicalSettings } = useGlobeSettings();
   const datasetsFetchedRef = useRef(false);
 
   const cleanLabel = (text = '') => text.replace(/\s*\(.*?\)/g, '').replace(/Dataset[:\s-]*/i, '').trim();
@@ -187,10 +187,86 @@ export default function Navbar({ onAboutClick }) {
     }
   };
 
+  const sanitizeFileName = (name) =>
+    String(name || 'dataset')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/\s+/g, '_')
+      .trim();
+
+  const toCsvCell = (value) => {
+    if (value === null || value === undefined) return '';
+    const text = String(value);
+    if (text.includes(',') || text.includes('"') || text.includes('\n')) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+  };
+
+  const handleDownloadData = useCallback(async () => {
+    if (!selectedDataset || !selectedDate) {
+      window.alert('Please select a dataset and date first.');
+      return;
+    }
+
+    try {
+      const levelParam = metadata?.multilevel && selectedLevel ? `&level=${selectedLevel}` : '';
+      const center = graphicalSettings?.pacificCentered ? 'pacific' : 'atlantic';
+      const url = `/api/slice?path=${encodeURIComponent(selectedDataset.relative_path)}&variable=${encodeURIComponent(selectedDataset.name)}&date=${encodeURIComponent(selectedDate)}&center=${center}${levelParam}`;
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch data: ${response.status} ${response.statusText}`);
+      }
+
+      const payload = await response.json();
+      const lats = Array.isArray(payload?.lats) ? payload.lats : [];
+      const lons = Array.isArray(payload?.lons) ? payload.lons : [];
+      const values = Array.isArray(payload?.values) ? payload.values : [];
+
+      if (!lats.length || !lons.length || !values.length) {
+        throw new Error('No grid data available for this selection.');
+      }
+
+      const valueHeader = selectedDataset.long_name || selectedDataset.name || 'Value';
+      const levelHeader = metadata?.multilevel ? `Level [${metadata?.level_units || 'level'}]` : 'Level';
+      const levelValue = metadata?.multilevel ? selectedLevel : 'Single Level';
+      const dateValue = String(selectedDate).length >= 7 ? String(selectedDate).slice(0, 7) : selectedDate;
+
+      const rows = [['Latitude', 'Longitude', valueHeader, levelHeader, 'Date']];
+      for (let i = 0; i < lats.length; i += 1) {
+        const row = Array.isArray(values[i]) ? values[i] : [];
+        for (let j = 0; j < lons.length; j += 1) {
+          const v = row[j];
+          rows.push([
+            lats[i],
+            lons[j],
+            Number.isFinite(v) ? v : '',
+            levelValue ?? '',
+            dateValue,
+          ]);
+        }
+      }
+
+      const csv = rows.map((r) => r.map(toCsvCell).join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `${sanitizeFileName(selectedDataset.dataset_name || selectedDataset.name)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      console.error('Download data failed:', err);
+      window.alert(err.message || 'Failed to download CSV.');
+    }
+  }, [selectedDataset, selectedDate, selectedLevel, metadata, graphicalSettings]);
+
   const navLinks = [
     { label: 'Top Datasets', path: '/datasets' },
     { label: 'Datasets', path: '#', onClick: handleDatasetsClick },
-    { label: 'Download Data', path: '/download' },
+    { label: 'Download Data', path: '#', onClick: handleDownloadData },
     { label: 'About', path: '#', onClick: onAboutClick },
   ];
 

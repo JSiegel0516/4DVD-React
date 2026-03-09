@@ -47,7 +47,6 @@ const App = memo(() => {
               }
             />
             <Route path="/datasets" element={<div>Datasets Page (TBD)</div>} />
-            <Route path="/download" element={<div>Download Data Page (TBD)</div>} />
           </Routes>
           <About4DVD
             open={aboutOpen}

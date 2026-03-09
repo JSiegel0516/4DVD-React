@@ -6,7 +6,6 @@ cftime
 numpy
 pandas
 tqdm
-plotly
 zarr
 fsspec
 scipy

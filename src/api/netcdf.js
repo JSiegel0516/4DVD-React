@@ -50,5 +50,5 @@ export async function getTimeSeries(lat, lon, variable) {
 
   const r = await fetch(url);
   if (!r.ok) throw new Error("Failed to fetch timeseries");
-  return await r.json(); // { data: [{time, value}], plotly_json, ... }
+  return await r.json(); // { data: [{time, value}], ... }
 }

@@ -1,17 +1,32 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Box, Typography, Button, FormControl, FormGroup, FormControlLabel, Switch, Radio, RadioGroup, FormLabel, Divider, Menu, MenuItem, InputLabel, Select } from '@mui/material';
+import { Box, Typography, Button, FormControl, FormGroup, FormControlLabel, Switch, Radio, RadioGroup, FormLabel, Divider, Menu, MenuItem, InputLabel, Select, TextField } from '@mui/material';
 import { Palette as PaletteIcon } from '@mui/icons-material';
 import { useGlobeSettings } from './GlobeSettingsContext';
 import ColorMapMenu from './ColorMapMenu';
 
 // Memoize to prevent rerenders unless props change
 function TabsContent({ tabValue }) {
-  const { graphicalSettings, updateGraphicalSettings, selectedDataset, setSelectedDataset, colorMapOpen, setColorMapOpen, setColormap } = useGlobeSettings();
+  const {
+    graphicalSettings,
+    updateGraphicalSettings,
+    selectedDataset,
+    setSelectedDataset,
+    selectedDate,
+    setSelectedDate,
+    selectedLevel,
+    setSelectedLevel,
+    availableDates,
+    metadata,
+    colorMapOpen,
+    setColorMapOpen,
+    setColormap,
+  } = useGlobeSettings();
   const [anchorEl, setAnchorEl] = useState(null);
   const [datasets, setDatasets] = useState([]);
   const [groupedDatasets, setGroupedDatasets] = useState({});
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [monthInput, setMonthInput] = useState('');
 
   // Handle switch toggle for context settings
   const handleContextSwitchChange = useCallback((event) => {
@@ -121,6 +136,50 @@ function TabsContent({ tabValue }) {
     handleMenuClose();
   }, [selectedDataset, setSelectedDataset, handleMenuClose]);
 
+  useEffect(() => {
+    setMonthInput(selectedDate && selectedDate.length >= 7 ? selectedDate.slice(0, 7) : '');
+  }, [selectedDate]);
+
+  const handleLevelChange = useCallback((event) => {
+    const value = event.target.value;
+    const matchedLevel = (metadata.levels || []).find((lvl) => String(lvl) === String(value));
+    setSelectedLevel(matchedLevel ?? value);
+  }, [metadata.levels, setSelectedLevel]);
+
+  const resolveDateFromMonth = useCallback((monthValue) => {
+    if (!monthValue) return null;
+
+    if (availableDates.length === 0) {
+      return `${monthValue}-01`;
+    }
+
+    const monthMatch = availableDates.find((d) => d.startsWith(monthValue));
+    return monthMatch || null;
+  }, [availableDates]);
+
+  const handleDateInputChange = useCallback((event) => {
+    const value = event.target.value;
+    setMonthInput(value);
+
+    const resolvedDate = resolveDateFromMonth(value);
+    if (resolvedDate) {
+      setSelectedDate(resolvedDate);
+    }
+  }, [resolveDateFromMonth, setSelectedDate]);
+
+  const handleDateInputBlur = useCallback(() => {
+    if (!monthInput) return;
+    const resolvedDate = resolveDateFromMonth(monthInput);
+
+    if (resolvedDate) {
+      setSelectedDate(resolvedDate);
+      return;
+    }
+
+    // Revert UI to the currently selected month when typed month has no backing data.
+    setMonthInput(selectedDate && selectedDate.length >= 7 ? selectedDate.slice(0, 7) : '');
+  }, [monthInput, resolveDateFromMonth, selectedDate, setSelectedDate]);
+
   return (
     <Box sx={{ flexGrow: 1, overflowY: 'auto' }}>
       {tabValue === 0 && (
@@ -143,6 +202,25 @@ function TabsContent({ tabValue }) {
               ? `${selectedDataset.dataset_name} | ${selectedDataset.long_name} (${selectedDataset.units})`
               : 'Select Dataset'}
           </Typography>
+          {selectedDataset && metadata.multilevel && Array.isArray(metadata.levels) && metadata.levels.length > 0 && (
+            <Box sx={{ maxWidth: 360, mx: 'auto', mb: 2 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel id="dataset-level-label">Level</InputLabel>
+                <Select
+                  labelId="dataset-level-label"
+                  value={selectedLevel === null || selectedLevel === undefined ? '' : String(selectedLevel)}
+                  label="Level"
+                  onChange={handleLevelChange}
+                >
+                  {metadata.levels.map((lvl) => (
+                    <MenuItem key={String(lvl)} value={String(lvl)}>
+                      {lvl} {metadata.level_units || ''}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Box>
+          )}
           <Menu
             anchorEl={anchorEl}
             open={Boolean(anchorEl && document.body.contains(anchorEl))}
@@ -187,9 +265,23 @@ function TabsContent({ tabValue }) {
           <Typography variant="h6" gutterBottom>
             Date
           </Typography>
-          <Typography variant="body1">
-            Date selection is handled via the Date Selector component.
-          </Typography>
+          <Box sx={{ maxWidth: 360, mx: 'auto' }}>
+            <TextField
+              fullWidth
+              type="month"
+              label="Month / Year"
+              value={monthInput}
+              onChange={handleDateInputChange}
+              onBlur={handleDateInputBlur}
+              InputLabelProps={{ shrink: true }}
+              size="small"
+            />
+            {selectedDate && (
+              <Typography variant="body2" sx={{ mt: 1 }}>
+                Selected: {selectedDate.slice(0, 7)}
+              </Typography>
+            )}
+          </Box>
         </Box>
       )}
       {tabValue === 2 && (

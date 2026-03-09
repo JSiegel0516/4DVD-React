@@ -1,6 +1,23 @@
 import * as THREE from 'three';
 import { geojsonToThreejsCoordinates } from '../geojsonToThreejs';
 
+const RIVERS_FILES = {
+  Low: './assets/ne_110m_rivers_lake_centerlines.json',
+  Medium: './assets/ne_50m_rivers_lake_centerlines.json',
+  High: './assets/ne_10m_rivers_lake_centerlines.json',
+  None: '',
+};
+
+const LAKES_FILES = {
+  Low: './assets/ne_110m_lakes.json',
+  Medium: './assets/ne_50m_lakes.json',
+  High: './assets/ne_10m_lakes.json',
+  None: '',
+};
+
+const getRiversFile = (value) => RIVERS_FILES[value] ?? '';
+const getLakesFile = (value) => LAKES_FILES[value] ?? '';
+
 // Helper function to detect seam crossing in Pacific-centered mode
 const crossesSeam = (lon1, lon2, isPacific) => {
   if (!isPacific) return false;
@@ -44,37 +61,11 @@ export async function loadRiversAndLakes(isPacificCentered = false, isMercator =
     return group;
   }
 
-  let riversFilePath, lakesFilePath;
-  switch (riversResolution) {
-    case 'Low':
-      riversFilePath = './assets/ne_110m_rivers_lake_centerlines.json';
-      break;
-    case 'Medium':
-      riversFilePath = './assets/ne_50m_rivers_lake_centerlines.json';
-      break;
-    case 'High':
-      riversFilePath = './assets/ne_10m_rivers_lake_centerlines.json';
-      break;
-    default:
-      riversFilePath = null;
-  }
-
-  switch (lakesResolution) {
-    case 'Low':
-      lakesFilePath = './assets/ne_110m_lakes.json';
-      break;
-    case 'Medium':
-      lakesFilePath = './assets/ne_50m_lakes.json';
-      break;
-    case 'High':
-      lakesFilePath = './assets/ne_10m_lakes.json';
-      break;
-    default:
-      lakesFilePath = null;
-  }
+  const riversFilePath = getRiversFile(riversResolution) || null;
+  const lakesFilePath = getLakesFile(lakesResolution) || null;
 
   const materialRiver = new THREE.LineBasicMaterial({ color: 0x0000ff });
-  const materialLake = new THREE.MeshBasicMaterial({ color: 0x00aaff, side: THREE.DoubleSide });
+  const materialLake = new THREE.LineBasicMaterial({ color: 0x00aaff });
   const radius = 2.01;
 
   if (riversFilePath) {
@@ -171,7 +162,7 @@ export async function loadRiversAndLakes(isPacificCentered = false, isMercator =
         let lakeSegmentCount = 0;
         for (let i = 0; i < data.Lon.length; i++) {
           if (data.Lon[i] === null || data.Lat[i] === null) {
-            if (currentCoords.length > 2) {
+            if (currentCoords.length > 1) {
               const normalizedCoords = currentCoords.map(([rawLon, lat]) => {
                 let adjustedLon = rawLon;
                 if (!isMercator) {
@@ -190,11 +181,10 @@ export async function loadRiversAndLakes(isPacificCentered = false, isMercator =
               const segments = splitSegmentAtSeams(normalizedCoords, isPacificCentered);
               segments.forEach(segment => {
                 const points = geojsonToThreejsCoordinates(segment, radius, isPacificCentered, isMercator);
-                if (points.length > 2) {
-                  const shape = new THREE.Shape(points);
-                  const geometry = new THREE.ShapeGeometry(shape);
-                  const mesh = new THREE.Mesh(geometry, materialLake);
-                  group.add(mesh);
+                if (points.length > 1) {
+                  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                  const line = new THREE.Line(geometry, materialLake);
+                  group.add(line);
                   lakeSegmentCount++;
                 }
               });
@@ -204,7 +194,7 @@ export async function loadRiversAndLakes(isPacificCentered = false, isMercator =
             currentCoords.push([data.Lon[i], data.Lat[i]]);
           }
         }
-        if (currentCoords.length > 2) {
+        if (currentCoords.length > 1) {
           const normalizedCoords = currentCoords.map(([rawLon, lat]) => {
             let adjustedLon = rawLon;
             if (!isMercator) {
@@ -222,11 +212,10 @@ export async function loadRiversAndLakes(isPacificCentered = false, isMercator =
           const segments = splitSegmentAtSeams(normalizedCoords, isPacificCentered);
           segments.forEach(segment => {
             const points = geojsonToThreejsCoordinates(segment, radius, isPacificCentered, isMercator);
-            if (points.length > 2) {
-              const shape = new THREE.Shape(points);
-              const geometry = new THREE.ShapeGeometry(shape);
-              const mesh = new THREE.Mesh(geometry, materialLake);
-              group.add(mesh);
+            if (points.length > 1) {
+              const geometry = new THREE.BufferGeometry().setFromPoints(points);
+              const line = new THREE.Line(geometry, materialLake);
+              group.add(line);
               lakeSegmentCount++;
             }
           });

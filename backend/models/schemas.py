@@ -33,7 +33,6 @@ class TimeSeriesResponse(BaseModel):
     lon: float
     units: Optional[str] = None
     data: List[Dict[str, Any]]
-    plotly_json: Optional[Dict[str, Any]] = None
 
 class XYZResponse(BaseModel):
     lat: float

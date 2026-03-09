@@ -12,7 +12,7 @@ export function GlobeSettingsProvider({ children }) {
     coasts: 'Medium',
     bumpMapping: 'None',
     countries: 'Off',
-    smoothedGridboxes: false,
+    smoothedGridboxes: true,
     geographicalLines: false,
     timezones: false,
   };

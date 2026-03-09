@@ -3,7 +3,6 @@ import { Dialog, DialogTitle, DialogContent, DialogActions, Button, IconButton, 
 import MenuIcon from '@mui/icons-material/Menu';
 import ArrowRightIcon from '@mui/icons-material/ArrowRight';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import Plot from 'react-plotly.js';
 import { useGlobeSettings } from './GlobeSettingsContext';
 import LinearTrend from './LinearTrend';
 import HistogramViewer from './HistogramViewer';
@@ -354,7 +353,7 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
           const levelKey = level === 'none' ? 'Single Level' : `${level} ${levelUnits}`;
           colors[levelKey] = baseColors[index % baseColors.length];
           console.log('Processing levelKey:', levelKey, 'with', xValues.length, 'data points');
-          // Map Plotly traces to data points
+          // Map backend timeseries arrays into Recharts-friendly rows
           for (let j = 0; j < xValues.length; j++) {
             const date = xValues[j];
             if (!allData[date]) {

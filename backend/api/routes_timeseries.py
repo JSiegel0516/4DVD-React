@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Query, HTTPException
-from typing import Optional, Literal
+from typing import Optional
 from models.schemas import TimeSeriesResponse
 from core.dataset import nearest_point_timeseries
 from core.utils import iso_times_from_coord
-from services.plotting import make_timeseries_plot
 
 router = APIRouter()
 
@@ -12,7 +11,6 @@ def timeseries(
     lat: float = Query(...),
     lon: float = Query(...),
     var: Optional[str] = None,
-    include_plot: Literal["none", "plotly_json"] = "plotly_json",
 ):
     from main import DS, VAR
     if DS is None:
@@ -28,9 +26,4 @@ def timeseries(
     units = ts.attrs.get("units")
 
     payload = [{"time": t, "value": val} for t, val in zip(times, vals)]
-    out = TimeSeriesResponse(var=v, lat=lat, lon=lon, units=units, data=payload)
-
-    if include_plot == "plotly_json":
-        out.plotly_json = make_timeseries_plot(payload, v, lat, lon, units)
-
-    return out
+    return TimeSeriesResponse(var=v, lat=lat, lon=lon, units=units, data=payload)
