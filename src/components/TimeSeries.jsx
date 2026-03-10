@@ -26,7 +26,7 @@ function StatisticsDialog({ open, onClose, lat, lon, varName, units, datasetName
       try {
         const levelParam = metadata.multilevel && level !== 'none' ? `&level=${level}` : '';
         const response = await fetch(
-          `/point_statistics?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
+          `/api/point_statistics?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
         );
         if (!response.ok) throw new Error(`Failed to fetch statistics: ${response.status} ${response.statusText}`);
         const data = await response.json();
@@ -278,7 +278,7 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
         if (metadata.multilevel && levelsToFetch.length > 0 && levelsToFetch[0] !== 'none') {
           const levelsParam = encodeURIComponent(levelsToFetch.join(','));
           const response = await fetch(
-            `/plot_timeseries?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}&all_levels=true&levels=${levelsParam}`,
+            `/api/plot_timeseries?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}&all_levels=true&levels=${levelsParam}`,
             { signal: controller.signal }
           );
           if (!response.ok) {
@@ -317,7 +317,7 @@ function TimeSeries({ open, onClose, lat, lon, varName, units, datasetName }) {
               console.log(`Fetching time series for level: ${level === 'none' ? 'single-level' : level + ' ' + levelUnits}`);
               const levelParam = level !== 'none' ? `&level=${level}` : '';
               const response = await fetch(
-                `/plot_timeseries?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`,
+                `/api/plot_timeseries?path=${encodeURIComponent(selectedDataset.relative_path)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`,
                 { signal: controller.signal }
               );
               if (!response.ok) throw new Error(`Failed to fetch time series for ${level === 'none' ? 'single-level' : 'level ' + level}: ${response.status} ${response.statusText}`);

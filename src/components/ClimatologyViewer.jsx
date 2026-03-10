@@ -119,7 +119,7 @@ const ClimatologyViewer = ({
 
       // Fetch full timeseries data
       const response = await fetch(
-        `/plot_timeseries?path=${encodeURIComponent(datasetPath)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
+        `/api/plot_timeseries?path=${encodeURIComponent(datasetPath)}&lat=${lat}&lon=${lon}&variable=${varName}${levelParam}`
       );
 
       if (!response.ok) {

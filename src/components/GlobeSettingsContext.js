@@ -75,7 +75,7 @@ export function GlobeSettingsProvider({ children }) {
       metadata_loading: true,
     }));
     console.log('Fetching metadata for', selectedDataset.relative_path);
-    fetch(`/dataset_info?path=${encodeURIComponent(selectedDataset.relative_path)}`)
+    fetch(`/api/dataset_info?path=${encodeURIComponent(selectedDataset.relative_path)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to fetch metadata: ${res.status} ${res.statusText}`);
         return res.json();
@@ -116,7 +116,7 @@ export function GlobeSettingsProvider({ children }) {
       });
 
     console.log('Fetching dates for', selectedDataset.relative_path);
-    fetch(`/dataset_dates?path=${encodeURIComponent(selectedDataset.relative_path)}`)
+    fetch(`/api/dataset_dates?path=${encodeURIComponent(selectedDataset.relative_path)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to fetch dates: ${res.status} ${res.statusText}`);
         return res.json();

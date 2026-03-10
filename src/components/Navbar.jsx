@@ -87,7 +87,7 @@ export default function Navbar({ onAboutClick }) {
     const path = dataset.relative_path;
     if (metadataCache[path]) return metadataCache[path];
     try {
-      const res = await fetch(`/dataset_info?path=${encodeURIComponent(path)}`);
+      const res = await fetch(`/api/dataset_info?path=${encodeURIComponent(path)}`);
       if (!res.ok) throw new Error(`Failed to fetch dataset info for ${path}`);
       const info = await res.json();
       setMetadataCache((prev) => ({ ...prev, [path]: info }));
@@ -108,7 +108,7 @@ export default function Navbar({ onAboutClick }) {
     if (datasetsFetchedRef.current) return;
     datasetsFetchedRef.current = true;
     setLoading(true);
-    fetch('/datasets')
+    fetch('/api/datasets')
       .then((response) => {
         if (!response.ok) throw new Error(`Failed to fetch datasets: ${response.statusText}`);
         return response.json();

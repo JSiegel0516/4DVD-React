@@ -1,22 +1,31 @@
-const BASE = import.meta.env.VITE_API_BASE || "";
+const BASE = import.meta.env.VITE_API_BASE || "/api";
 
 /**
  * Fetch dataset metadata from FastAPI.
  * Returns variables, attributes, and available times.
  */
 export async function getDatasets() {
-  const r = await fetch(`${BASE}/datasets/metadata`);
+  const r = await fetch(`${BASE}/datasets`);
   if (!r.ok) throw new Error("Failed to fetch datasets metadata");
-  return await r.json(); // { dataset_title, variables, times, ... }
+  return await r.json();
 }
 
 /**
  * Get list of available dates (ISO strings).
  * Just reuses the metadata endpoint.
  */
-export async function getDates() {
-  const meta = await getDatasets();
-  return meta.times || [];
+export async function getDates(selectedDatasetPath) {
+  const path =
+    typeof selectedDatasetPath === "string"
+      ? selectedDatasetPath
+      : selectedDatasetPath?.relative_path || selectedDatasetPath?.path;
+
+  if (!path) return [];
+
+  const r = await fetch(`${BASE}/dataset_dates?path=${encodeURIComponent(path)}`);
+  if (!r.ok) throw new Error("Failed to fetch dataset dates");
+  const payload = await r.json();
+  return payload?.dates || [];
 }
 
 /**
@@ -43,10 +52,10 @@ export async function getGrid(variable, date, downsample = 2) {
  * @param {string} variable - variable name
  */
 export async function getTimeSeries(lat, lon, variable) {
-  const url = new URL(`${BASE}/timeseries`, window.location.origin);
+  const url = new URL(`${BASE}/plot_timeseries`, window.location.origin);
   url.searchParams.set("lat", lat);
   url.searchParams.set("lon", lon);
-  if (variable) url.searchParams.set("var", variable);
+  if (variable) url.searchParams.set("variable", variable);
 
   const r = await fetch(url);
   if (!r.ok) throw new Error("Failed to fetch timeseries");
