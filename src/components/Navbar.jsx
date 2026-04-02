@@ -300,6 +300,7 @@ export default function Navbar({ onAboutClick }) {
                 to={path !== '#' ? path : undefined}
                 onClick={onClick}
                 startIcon={label === 'About' ? <InfoOutlinedIcon /> : null}
+                sx={{ fontSize: '1rem', fontWeight: 'bold', mx: 5 }}
               >
                 {label}
               </Button>
