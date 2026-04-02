@@ -68,11 +68,11 @@ function DateSelector() {
         }}
         onClick={handleClick}
       >
-        <Typography variant="h6" sx={{ color: 'black', fontWeight: 'bold', fontSize: '1.5rem' }}>
+        <Typography variant="h6" sx={{ color: 'black', fontWeight: 'bold', fontSize: '36px', lineHeight: 1.1 }}>
           {selectedDate && typeof selectedDate === 'string' ? selectedDate.substring(0, 7) : (availableDates.length === 0 ? 'No dates available' : 'Choose Date')}
         </Typography>
         {metadata.multilevel && selectedLevel && (
-          <Typography variant="body1" sx={{ color: 'black', fontSize: '1rem' }}>
+          <Typography variant="body1" sx={{ color: 'black', fontSize: '1.25rem', fontWeight: 600 }}>
             Level: {selectedLevel} mb
           </Typography>
         )}
